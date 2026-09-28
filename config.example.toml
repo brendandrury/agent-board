@@ -1,0 +1,48 @@
+# agent-board config. Copy to ~/.config/agent-board/config.toml and edit.
+# Every setting is optional.
+
+# Sessions are read from ~/.claude and ~/.codex, or $CLAUDE_CONFIG_DIR and
+# $CODEX_HOME if set, and resumed with `claude --resume <id>` / `codex resume <id>`.
+
+# The tool that files sessions, and the --model to pass it. For claude the
+# default model is sonnet; set "" to use the tool's own default.
+# classifier = "claude"            # or "codex"
+# classifier_model = "sonnet"
+# effort = "low"                   # low, medium or high
+
+# How the headless Claude classifier is isolated from your hooks, CLAUDE.md,
+# plugins and MCP servers. "bare" is the tightest but only works with an API key
+# or Bedrock/Vertex/Foundry credentials; "restricted" works with a claude.ai
+# login but refuses settings that default to bypassPermissions; "none"
+# relies on --tools "" and --strict-mcp-config alone. "auto" tries them in that
+# order and settles on the first that runs.
+# claude_isolation = "auto"
+
+# Phones, emails, SSNs and Salesforce IDs are scrubbed from what the classifier
+# sees unless its model id is listed here. Secrets are always scrubbed.
+# pii_cleared_models = []
+
+# days = 14                        # only file sessions active in the last N days
+# budget = 100000                  # max transcript characters sent per session
+# workers = 4                      # parallel classifier calls
+# port = 8765
+
+# Links and display.
+# issue_url = "https://yourco.atlassian.net/browse/{key}"   # issue keys like ABC-123 become links
+# github_repo = "you/repo"         # for PR numbers when the session's cwd has no GitHub remote
+# projects_dir = "~/code"          # paths under here are shown relative to it
+
+# Where Resume opens a session: "auto" or "Terminal" (Terminal.app), "iTerm", or
+# an argv template, e.g. ["kitty", "zsh", "-ic", "{cmd}; exec zsh"]. On macOS,
+# resuming a session that's already open brings its Terminal or iTerm tab forward.
+# terminal = "auto"
+
+# A sentence or two about you and your work, so the classifier's titles and
+# workstreams use your vocabulary.
+# about = "Backend engineer on the payments team; most work is in the billing-api repo."
+
+# Preferred workstream names and what belongs in each. The classifier reuses
+# these when a session fits and coins new names for work that fits none.
+# [workstreams]
+# "Billing Migration" = "moving invoices off the legacy system"
+# "Agent Tooling" = "launchers, MCP servers, agent-board itself"
