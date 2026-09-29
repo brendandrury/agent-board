@@ -35,6 +35,11 @@ import secrets
 import shlex
 import subprocess
 import sys
+
+if sys.version_info < (3, 12):  # before the imports that would fail with a less useful error
+    sys.exit(f"agent-board needs Python 3.12 or newer; {sys.executable} is {sys.version.split()[0]}. "
+             "Install a newer python3, or run it with one: python3.12 agent_board.py")
+
 import tempfile
 import threading
 import tomllib

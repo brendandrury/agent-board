@@ -8,23 +8,112 @@ one click resumes any session in the right directory with the right command. You
 can close every tab at the end of the day and pick up where you left off the
 next morning.
 
-It is a single Python file with no dependencies beyond the standard library
-(Python 3.12+), and it runs on macOS and Linux. On Linux the Resume button needs
-the `terminal` setting; Copy command works everywhere.
+It is a single Python file with no dependencies beyond the standard library.
+It's developed on macOS. It should work on Linux, but it hasn't been tested
+there much.
 
-## Install
+## Setup
+
+### 1. Check the prerequisites
+
+- **Python 3.12 or newer.** Run `python3 --version`. The Python that comes with
+  macOS is 3.9, so if that's what you get, install a newer one with
+  `brew install python` or from python.org.
+- **Claude Code, Codex, or both.** agent-board reads the sessions they save in
+  `~/.claude` and `~/.codex`, or wherever `CLAUDE_CONFIG_DIR` and `CODEX_HOME`
+  point when you run it.
+- **A signed-in classifier.** Sessions are filed by `claude -p`, so `claude`
+  must be on your PATH and signed in. Codex works too: set
+  `classifier = "codex"` in the config (step 4).
+
+### 2. Install
 
 ```sh
-git clone https://github.com/<you>/agent-board
-ln -s "$PWD/agent-board/agent_board.py" ~/.local/bin/agent-board
-agent-board --dry-run      # see what it would file, without calling a model
-agent-board                # scan, file, and open the board
+git clone https://github.com/brendandrury/agent-board ~/agent-board
+mkdir -p ~/.local/bin
+ln -s ~/agent-board/agent_board.py ~/.local/bin/agent-board
 ```
 
-With no config it reads `~/.claude` and `~/.codex` (or `$CLAUDE_CONFIG_DIR`
-and `$CODEX_HOME`), resumes with `claude --resume <id>` and `codex resume <id>`, and files sessions
-with `claude -p --model sonnet`. Copy `config.example.toml` to
-`~/.config/agent-board/config.toml` to change any of that.
+If your shell can't find `agent-board` after this, `~/.local/bin` isn't on your
+PATH. Add `export PATH="$HOME/.local/bin:$PATH"` to `~/.zshrc` or `~/.bashrc`
+and open a new terminal. To update later, run `git pull` in the clone.
+
+### 3. Preview with a dry run
+
+```sh
+agent-board --dry-run
+```
+
+This scans your sessions and lists the ones it would file, with a rough token
+count. It doesn't call a model. Only sessions active in the last 14 days get
+filed (change it with `--days` or the `days` setting). Older sessions still
+appear on the board, under the Unfiled filter.
+
+### 4. Configure (optional)
+
+```sh
+mkdir -p ~/.config/agent-board
+cp ~/agent-board/config.example.toml ~/.config/agent-board/config.toml
+```
+
+Every setting is optional and explained in the file. These are worth filling in:
+
+- `about` and `[workstreams]`, so titles and groups use your own vocabulary.
+- `projects_dir`, so paths under it are shown relative to it.
+- `issue_url`, so issue keys become links.
+- `pii_cleared_models`, if the classifier's provider is approved for personal data.
+
+### 5. First run
+
+```sh
+agent-board --limit 5
+```
+
+This files your five most recent sessions and opens the board at
+`http://127.0.0.1:8765/`. If the filings look right, stop it with Ctrl-C and
+run `agent-board` to file the rest. With Sonnet at low effort, each session
+costs about 2 to 3 cents, and the dry run tells you how many there are. After
+that, only sessions with new activity are filed again.
+
+Leave the board running while you work. The "Refresh and file" button picks
+up new activity, and Ctrl-C stops the server. `agent-board serve` opens the
+board without filing anything.
+
+### 6. Let it open terminals
+
+- **macOS.** The first time you click Resume, macOS asks whether your terminal
+  app may control Terminal or iTerm. Allow it. For Resume to open a new tab
+  rather than a new window in Terminal.app, your terminal app also needs
+  Accessibility permission (System Settings > Privacy & Security >
+  Accessibility), and permission to control System Events. Without those, you
+  get a new window, and the page tells you once why. iTerm needs neither.
+- **Linux.** Resume needs a `terminal` template in the config, for example
+  `terminal = ["gnome-terminal", "--", "bash", "-ic", "{cmd}; exec bash"]`.
+  Without one, use the Copy command button.
+
+### Troubleshooting
+
+- **"agent-board needs Python 3.12 or newer."** See step 1. You can also run it
+  with a specific interpreter: `python3.12 ~/agent-board/agent_board.py`.
+- **Cards show a filing error such as "Not logged in".** A plain `claude -p`
+  couldn't authenticate. Run `claude` once and sign in. If your credentials are
+  only set inside a shell alias or wrapper script, export them from your shell
+  profile or use an `apiKeyHelper`, so a plain `claude` finds them. With a
+  claude.ai login, agent-board drops to `--restricted` isolation by itself (see
+  `claude_isolation`).
+- **A session is missing.** Headless sessions (`claude -p`, `codex exec`, SDK
+  runs) are skipped on purpose. Otherwise, the session probably lives in a
+  config dir other than the one agent-board read: it reads one Claude dir and
+  one Codex dir, the defaults or whatever `CLAUDE_CONFIG_DIR` and `CODEX_HOME`
+  are set to.
+- **Resume opens windows instead of tabs.** See step 6.
+
+### Uninstall
+
+```sh
+rm ~/.local/bin/agent-board
+rm -rf ~/.local/share/agent-board ~/.config/agent-board ~/agent-board
+```
 
 ## Commands
 
