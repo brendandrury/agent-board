@@ -77,6 +77,7 @@ class Config:
     github_repo: str = ""
     projects_dir: str = ""
     terminal: object = "auto"
+    new_tab: bool = True  # Resume opens a tab in the front Terminal or iTerm window
     about: str = ""
     workstreams: dict = dataclasses.field(default_factory=dict)
 
@@ -890,7 +891,9 @@ async function resume(s, btn) {
       if ((await api("/api/focus", {id: s.id})).focused) return flash(btn, "Focused");
       if (!confirm("This session is still open (pid " + s.live.pid + "), but not in a Terminal or iTerm tab I can bring forward. Open a second copy anyway?")) return;
     }
-    await api("/api/resume", {id: s.id}); flash(btn, "Opened");
+    const r = await api("/api/resume", {id: s.id});
+    flash(btn, r.opened === "tab" ? "Opened in a tab" : "Opened");
+    if (r.note && !resume.noted) { resume.noted = true; alert(r.note); }
   } catch (e) { alert("Resume failed: " + e.message); }
 }
 
@@ -1002,10 +1005,70 @@ render();
 
 # ---------------------------------------------------------------- server
 
-_ITERM = ["on run argv", 'tell application "iTerm"', "activate", "set w to (create window with default profile)",
-          "tell current session of w to write text (item 1 of argv)", "end tell", "end run"]
-_TERMINAL = ["on run argv", 'tell application "Terminal"', "activate", "do script (item 1 of argv)", "end tell", "end run"]
-
+# Each gets argv (command, "1" for a tab) and returns "tab", or "window" plus
+# why a tab wasn't possible. Terminal has no scripting verb for a new tab, so it
+# sends Cmd-T through System Events, which needs Accessibility permission, and
+# only once Terminal is frontmost so the keystroke can't land in another app.
+_ITERM = """
+on run argv
+set cmd to item 1 of argv
+if item 2 of argv is "1" and application "iTerm" is running then
+tell application "iTerm"
+if (count of windows) > 0 then
+activate
+tell current window to set t to (create tab with default profile)
+tell current session of t to write text cmd
+return "tab"
+end if
+end tell
+end if
+tell application "iTerm"
+activate
+set w to (create window with default profile)
+tell current session of w to write text cmd
+end tell
+return "window"
+end run
+"""
+_TERMINAL = """
+on run argv
+set cmd to item 1 of argv
+set why to ""
+if item 2 of argv is "1" and application "Terminal" is running then
+try
+tell application "Terminal"
+if (count of windows) is 0 then error "no Terminal window is open"
+activate
+set n to count of tabs of front window
+end tell
+tell application "System Events"
+repeat 40 times
+if frontmost of process "Terminal" then exit repeat
+delay 0.05
+end repeat
+if not (frontmost of process "Terminal") then error "Terminal didn't come to the front"
+keystroke "t" using command down
+end tell
+tell application "Terminal"
+repeat 40 times
+if (count of tabs of front window) > n then exit repeat
+delay 0.05
+end repeat
+if (count of tabs of front window) is n then error "the new tab didn't appear"
+do script cmd in selected tab of front window
+end tell
+return "tab"
+on error e number k
+set why to e & " (" & k & ")"
+end try
+end if
+tell application "Terminal"
+activate
+do script cmd
+end tell
+return "window" & linefeed & why
+end run
+"""
 
 _FOCUS = {
     "Terminal": ['tell application "Terminal"', "repeat with w in windows", "repeat with b in tabs of w",
@@ -1015,6 +1078,14 @@ _FOCUS = {
               "repeat with ss in sessions of b", "if tty of ss is t then", "select w", "select b", "select ss",
               "activate", 'return "found"', "end if", "end repeat", "end repeat", "end repeat", "end tell"],
 }
+
+
+def osascript(script, *args):
+    """Run AppleScript given as lines; args go in as argv, so it never parses them."""
+    lines = script.strip().splitlines() if isinstance(script, str) else script
+    r = subprocess.run(["osascript", *[a for line in lines for a in ("-e", line)], *args],
+                       check=True, capture_output=True, text=True, timeout=20)
+    return r.stdout.strip()
 
 
 def focus_terminal(pid):
@@ -1034,12 +1105,10 @@ def focus_terminal(pid):
         script = ["on run argv", "set t to item 1 of argv", f'if application "{app}" is running then',
                   *_FOCUS[app], "end if", 'return ""', "end run"]
         try:
-            r = subprocess.run(["osascript", *[a for line in script for a in ("-e", line)], "/dev/" + tty],
-                               capture_output=True, text=True, timeout=20)
+            if osascript(script, "/dev/" + tty) == "found":
+                return True
         except (OSError, subprocess.SubprocessError):
             continue
-        if r.stdout.strip() == "found":
-            return True
     return False
 
 
@@ -1048,19 +1117,33 @@ def terminal_configured():
     return (isinstance(t, list) and bool(t)) or (t in ("auto", "Terminal", "iTerm") and sys.platform == "darwin")
 
 
+# Denials from macOS privacy settings, as opposed to "no window to add a tab to".
+_PERMISSION = re.compile(r"not allowed|not authori[sz]ed|assistive|permission|\((1002|-1743|-25211)\)")
+
+
 def open_terminal(cmd):
+    """Run cmd in a new terminal tab or window. Returns (where, note): where is
+    "tab" or "window", and note says how to get tabs when permissions blocked one."""
     t = CFG.terminal
     if isinstance(t, list) and t:
         # A template like ["kitty", "zsh", "-ic", "{cmd}; exec zsh"]; argv, no shell parsing here.
         subprocess.Popen([str(a).replace("{cmd}", cmd) for a in t], start_new_session=True,
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return
+        return "window", ""
     if sys.platform != "darwin" or t not in ("auto", "Terminal", "iTerm"):
         raise ValueError(f"no terminal configured for Resume; set terminal in {CONFIG_FILE}")
     script = _ITERM if t == "iTerm" else _TERMINAL
-    # The command goes in as argv, so AppleScript never parses it.
-    subprocess.run(["osascript", *[a for line in script for a in ("-e", line)], cmd],
-                   check=True, capture_output=True, text=True, timeout=20)
+    try:
+        where, _, why = osascript(script, cmd, "1" if CFG.new_tab else "0").partition("\n")
+    except subprocess.TimeoutExpired:
+        # A macOS permission prompt blocks the script until it's answered.
+        where, why = osascript(script, cmd, "0"), "macOS is asking for permission (timed out)"
+    note = ""
+    if where != "tab" and _PERMISSION.search(why):
+        note = (f"Opened a new window because macOS blocked the new tab: {why}. To get tabs, allow the app "
+                "running agent-board under System Settings > Privacy & Security > Accessibility, and under "
+                "Automation > System Events. Or set new_tab = false to always use windows.")
+    return where.split("\n")[0], note
 
 
 class Board:
@@ -1168,8 +1251,8 @@ class Board:
         cmd = resume_command(meta, pick_launcher(self.launchers, meta["kind"], meta["home"], meta.get("model")))
         if not cmd:
             raise ValueError("no launcher found for this session's profile")
-        open_terminal(cmd)
-        return {"ok": True, "command": cmd}
+        where, note = open_terminal(cmd)
+        return {"ok": True, "command": cmd, "opened": where, "note": note}
 
     def focus(self, sid):
         meta = self._session(sid)

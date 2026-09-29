@@ -182,6 +182,42 @@ class Rendering(Base):
                                                          "https://github.com/acme/widgets/pull/43"])
 
 
+class Terminal(Base):
+    def test_open_terminal_reports_tab_window_and_permission_fallback(self):
+        ab.CFG = ab.Config(terminal="Terminal").finish()
+        calls, replies = [], []
+
+        def fake(script, cmd, tab):
+            calls.append(tab)
+            r = replies.pop(0)
+            if isinstance(r, Exception):
+                raise r
+            return r
+
+        orig, ab.osascript = ab.osascript, fake
+        orig_platform, ab.sys.platform = ab.sys.platform, "darwin"
+        try:
+            replies[:] = ["tab"]
+            self.assertEqual(ab.open_terminal("true"), ("tab", ""))
+            replies[:] = ["window\nosascript is not allowed to send keystrokes. (1002)"]
+            where, note = ab.open_terminal("true")
+            self.assertEqual(where, "window")
+            self.assertIn("Accessibility", note)
+            replies[:] = ["window\nno Terminal window is open (-2700)"]
+            self.assertEqual(ab.open_terminal("true"), ("window", ""))
+            calls.clear()
+            replies[:] = [ab.subprocess.TimeoutExpired("osascript", 20), "window\n"]
+            self.assertEqual(ab.open_terminal("true")[0], "window")
+            self.assertEqual(calls, ["1", "0"])
+            ab.CFG = ab.Config(terminal="Terminal", new_tab=False).finish()
+            calls.clear()
+            replies[:] = ["window\n"]
+            ab.open_terminal("true")
+            self.assertEqual(calls, ["0"])
+        finally:
+            ab.osascript, ab.sys.platform = orig, orig_platform
+
+
 class Filing(Base):
     def test_vocabulary_seeds_first_and_pending_do_not_vote(self):
         ab.CFG = ab.Config(workstreams={"Seeded": "desc"}).finish()

@@ -36,6 +36,9 @@
 # an argv template, e.g. ["kitty", "zsh", "-ic", "{cmd}; exec zsh"]. On macOS,
 # resuming a session that's already open brings its Terminal or iTerm tab forward.
 # terminal = "auto"
+# new_tab = true                   # open in a new tab of the front window, not a new window.
+#                                  # In Terminal.app this sends Cmd-T, which needs the app
+#                                  # running agent-board allowed under Accessibility.
 
 # A sentence or two about you and your work, so the classifier's titles and
 # workstreams use your vocabulary.

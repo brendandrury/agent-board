@@ -45,8 +45,12 @@ Useful flags: `--days N` files only sessions active in the last N days (default
 - "Hide before" hides sessions whose last message is older than the date you
   pick. The date is remembered between visits.
 - The search box matches titles, summaries, PR numbers, issue keys and paths.
-- Each card can resume its session in a new terminal window. If the session is
-  already open in Terminal or iTerm, it brings that tab forward instead.
+- Each card can resume its session in a new tab of your front Terminal or iTerm
+  window. If the session is already open in one of them, it brings that tab
+  forward instead. Terminal.app has no scripting command for tabs, so
+  agent-board presses Cmd-T for you. That needs the app running agent-board to
+  be allowed under Privacy & Security > Accessibility; without it, or with
+  `new_tab = false`, you get a new window.
 - Each card can also copy its resume command, set its status, or move it to
   another workstream.
 - Your edits are kept apart from the model's filing. A status you set holds
