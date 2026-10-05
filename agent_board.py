@@ -1014,6 +1014,8 @@ render();
 # why a tab wasn't possible. Terminal has no scripting verb for a new tab, so it
 # sends Cmd-T through System Events, which needs Accessibility permission, and
 # only once Terminal is frontmost so the keystroke can't land in another app.
+# Terminal's scripting lists each native tab as a window with one tab, so the
+# new tab shows up as a window id that wasn't there before the keystroke.
 _ITERM = """
 on run argv
 set cmd to item 1 of argv
@@ -1044,7 +1046,7 @@ try
 tell application "Terminal"
 if (count of windows) is 0 then error "no Terminal window is open"
 activate
-set n to count of tabs of front window
+set known to id of every window
 end tell
 tell application "System Events"
 repeat 40 times
@@ -1055,12 +1057,17 @@ if not (frontmost of process "Terminal") then error "Terminal didn't come to the
 keystroke "t" using command down
 end tell
 tell application "Terminal"
+set wid to missing value
 repeat 40 times
-if (count of tabs of front window) > n then exit repeat
+set ids to id of every window
+repeat with i in ids
+if known does not contain (contents of i) then set wid to (contents of i)
+end repeat
+if wid is not missing value then exit repeat
 delay 0.05
 end repeat
-if (count of tabs of front window) is n then error "the new tab didn't appear"
-do script cmd in selected tab of front window
+if wid is missing value then error "the new tab didn't appear"
+do script cmd in selected tab of window id wid
 end tell
 return "tab"
 on error e number k
