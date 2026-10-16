@@ -1,0 +1,555 @@
+"""Tests for the review pipeline. Stdlib only; every fixture is synthetic and
+nothing reaches GitHub, git or a model.
+
+    python3 -m unittest discover -s tests
+"""
+import importlib.util
+import json
+import os
+import shutil
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+_tmp = tempfile.mkdtemp(prefix="agent-board-review-test-")
+os.environ["AGENT_BOARD_STATE"] = str(Path(_tmp) / "state")
+os.environ["AGENT_BOARD_CONFIG"] = str(Path(_tmp) / "cfg" / "config.toml")
+
+
+def _load(name):
+    spec = importlib.util.spec_from_file_location(name, ROOT / f"{name}.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+ab = sys.modules.get("agent_board") or _load("agent_board")
+rv = _load("review")
+
+HEAD, OLD = "a" * 40, "b" * 40
+DIFF = """diff --git a/app/x.py b/app/x.py
+index 1..2 100644
+--- a/app/x.py
++++ b/app/x.py
+@@ -10,3 +10,4 @@ def f():
+ keep = 1
+-gone = 2
++new = 2
+++++ looks like a header but is an added line
+ tail = 3
+\\ No newline at end of file
+diff --git a/docs/new.md b/docs/new.md
+new file mode 100644
+--- /dev/null
++++ b/docs/new.md
+@@ -0,0 +1,2 @@
++one
++two
+diff --git a/old.txt b/old.txt
+deleted file mode 100644
+--- a/old.txt
++++ /dev/null
+@@ -1 +0,0 @@
+-bye
+"""
+
+
+class Base(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(dir=_tmp))
+        ab.CFG = ab.Config(review_repo="acme/widgets", review_launcher="opus", review_authors=["dev1"]).finish()
+        self._saved = {k: getattr(rv, k) for k in ("me", "fetch_pr", "graphql", "prepare", "call", "once", "launcher",
+                                                   "existing_feedback", "small_launchers", "reviewers", "_related",
+                                                   "clone_dir", "get_launcher", "git", "_codex")}
+        rv.me = lambda: "reviewer"
+        rv.fetch_pr = lambda n: {"state": "OPEN", "headRefOid": HEAD, "author": {"login": "dev1"}}
+        rv.launcher = lambda: ab.Launcher("opus", "claude", "/x", "us.anthropic.claude-opus-5-5")
+        ab.CFG.pii_cleared_models = ["us.anthropic.claude-opus-5-5", "small-a", "small-b"]
+        rv._related = lambda run, path, diff: ""
+        ab.CFG.review_filter = ""  # tests that want a triaging filter set one
+
+        def no_models(*a, **k):
+            raise AssertionError("a test reached a real model call")
+        rv.call = rv.once = no_models
+        rv._codex = no_models
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            setattr(rv, k, v)
+        shutil.rmtree(Path(os.environ["AGENT_BOARD_STATE"]) / "reviews", ignore_errors=True)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def make_run(self, findings=(), draft=None):
+        path = rv._new_run_dir(7)
+        run = rv.Run(path)
+        run.meta = {"id": path.name, "repo": "acme/widgets", "pr": 7, "effort": "medium", "mode": "full", "done": [],
+                    "sessions": {}, "cost_usd": 0, "state": "waiting", "head": HEAD, "checkout": str(self.tmp),
+                    "author": "dev1"}
+        run.save()
+        (path / "pr.diff").write_text(DIFF)
+        run.store("pr.json", {"title": "T", "body": "B"})
+        run.save_findings([rv._finding(f, HEAD, {"model": "m"}, f"f{i + 1}") for i, f in enumerate(findings)])
+        if draft:
+            rv._save_version(run, draft, "model")
+        return run
+
+
+class Diff(Base):
+    def test_commentable_lines_are_head_side_hunk_lines(self):
+        files = rv.commentable(DIFF)
+        self.assertEqual(set(files), {"app/x.py", "docs/new.md"})
+        self.assertEqual(files["app/x.py"], ({10, 11, 12, 13}, {11, 12}))
+        self.assertEqual(files["docs/new.md"], ({1, 2}, {1, 2}))
+
+    def test_ranges(self):
+        self.assertEqual(rv.ranges({1, 2, 3, 7, 9, 10}), "1-3, 7, 9-10")
+        self.assertEqual(rv.ranges(set()), "")
+
+
+class Drafts(Base):
+    def test_off_diff_comments_move_into_the_body(self):
+        run = self.make_run()
+        v, moved = rv._fit(run, {"body": "Looks good.", "event": "APPROVE", "comments": [
+            {"path": "app/x.py", "line": 11, "body": "on the diff"},
+            {"path": "app/x.py", "line": 40, "body": "outside the hunks"},
+            {"path": "app/y.py", "line": 1, "body": "not in the PR"}]})
+        self.assertEqual(moved, 2)
+        self.assertEqual([c["line"] for c in v["comments"]], [11])
+        self.assertIn("`app/x.py:40`: outside the hunks", v["body"])
+        self.assertTrue(v["body"].startswith("Looks good."))
+
+    def test_payload_puts_the_disclosure_first(self):
+        run = self.make_run(draft={"body": "Two notes inline.", "event": "APPROVE",
+                                   "comments": [{"path": "app/x.py", "line": 12, "body": "c", "finding_ids": ["f1"]}]})
+        p = rv.payload(run)
+        self.assertEqual(p["commit_id"], HEAD)
+        self.assertTrue(p["body"].startswith("*Review generated by AI. My input"))
+        self.assertIn("initial draft review.*", p["body"])
+        rv._save_version(run, run.draft(), "model", "shorter")
+        self.assertIn("initial draft review.*", rv.payload(run)["body"])  # one round of feedback
+        rv._save_version(run, run.draft(), "model", "shorter still")
+        self.assertIn("initial draft reviews.*", rv.payload(run)["body"])
+        self.assertTrue(p["body"].endswith("Two notes inline."))
+        self.assertEqual(p["comments"], [{"path": "app/x.py", "line": 12, "side": "RIGHT", "body": "c"}])
+        self.assertEqual(rv.payload(run, "COMMENT")["event"], "COMMENT")
+        with self.assertRaises(rv.ReviewError):
+            rv.payload(run, "MERGE")
+
+
+class Posting(Base):
+    def test_checks(self):
+        run = self.make_run(findings=[{"file": "app/x.py", "line": 11, "severity": "blocking", "claim": "c"}],
+                            draft={"body": "ok", "event": "APPROVE", "comments": []})
+        fs = run.findings()
+        fs[0]["status"] = "confirmed"
+        run.save_findings(fs)
+        blockers, warnings = rv.checks(run, rv.payload(run))
+        self.assertEqual(blockers, [])
+        self.assertIn("blocking", warnings[0])
+        rv.fetch_pr = lambda n: {"state": "OPEN", "headRefOid": OLD, "author": {"login": "dev1"}}
+        p = rv.payload(run)
+        p["body"] += " ghp_" + "x" * 30
+        blockers, _ = rv.checks(run, p)
+        self.assertTrue(blockers[0].startswith("the head moved"))
+        self.assertIn("credential", blockers[1])
+
+    def test_post_refuses_a_moved_head_unless_forced(self):
+        run = self.make_run(draft={"body": "ok", "event": "COMMENT", "comments": []})
+        rv.fetch_pr = lambda n: {"state": "OPEN", "headRefOid": OLD, "author": {"login": "dev1"}}
+        sent = []
+        saved = rv.gh
+        rv.gh = lambda *a, input=None, **k: sent.append((a, input)) or '{"id": 1, "html_url": "u"}'
+        try:
+            with self.assertRaises(rv.ReviewError):
+                rv.post(run)
+            self.assertEqual(sent, [])
+            rv.post(run, force=True)
+        finally:
+            rv.gh = saved
+        self.assertEqual(sent[0][0][:4], ("api", "-X", "POST", "repos/acme/widgets/pulls/7/reviews"))
+        self.assertEqual(json.loads(sent[0][1])["commit_id"], HEAD)
+        self.assertEqual(rv.Run(run.path).meta["state"], "posted")
+
+
+class Existing(Base):
+    def test_every_source_is_read_with_edits_and_resolution(self):
+        pr = {"reviews": {"nodes": [
+            {"databaseId": 1, "author": {"login": "review-bot", "__typename": "Bot"}, "state": "COMMENTED", "body": "summary",
+             "submittedAt": "2026-01-01T00:00:00Z", "lastEditedAt": "2026-01-02T00:00:00Z", "commit": {"oid": OLD},
+             "comments": {"nodes": [{"databaseId": 11, "path": "a.py", "line": None, "originalLine": 3, "body": "bug",
+                                     "createdAt": "2026-01-01T00:00:00Z", "lastEditedAt": None, "outdated": True,
+                                     "replyTo": None}]}},
+            {"databaseId": 2, "author": {"login": "reviewer", "__typename": "User"}, "state": "APPROVED", "body": "",
+             "submittedAt": "2026-01-03T00:00:00Z", "lastEditedAt": None, "commit": {"oid": HEAD}, "comments": {"nodes": []}},
+            {"databaseId": 3, "author": {"login": "dev1", "__typename": "User"}, "state": "COMMENTED", "body": "",
+             "submittedAt": "2026-01-03T00:00:00Z", "lastEditedAt": None, "commit": {"oid": HEAD}, "comments": {"nodes": []}}]},
+              "comments": {"nodes": [{"databaseId": 5, "author": {"login": "github-actions", "__typename": "Bot"},
+                                      "body": "3 findings", "createdAt": "2026-01-01T00:00:00Z",
+                                      "lastEditedAt": "2026-01-05T00:00:00Z"}]},
+              "reviewThreads": {"nodes": [{"isResolved": True, "comments": {"nodes": [{"databaseId": 11}]}}]}}
+        rv.graphql = lambda query, **v: {"repository": {"pullRequest": pr}}
+        items = rv.existing_feedback(7, "dev1", since="2026-01-04T00:00:00Z")["items"]
+        self.assertEqual([(i["ref"], i["from"], i["bot"]) for i in items], [
+            ("review-1", "review-bot", True), ("comment-11", "review-bot", True), ("review-2", "you", False),
+            ("issue-comment-5", "github-actions", True)])
+        self.assertEqual(items[0]["edited_at"], "2026-01-02T00:00:00Z")
+        self.assertTrue(items[1]["outdated"] and items[1]["resolved"])
+        self.assertEqual([i["new_since_last_run"] for i in items], [False, False, False, True])
+
+
+class PrList(Base):
+    def test_edited_feedback_after_your_review_flags_the_pr(self):
+        def node(n, edited):
+            return {"number": n, "title": "T", "url": "u", "isDraft": False, "updatedAt": "2026-01-0%dT00:00:00Z" % n,
+                    "baseRefName": "main", "headRefOid": HEAD, "author": {"login": "dev1"},
+                    "reviews": {"nodes": [{"author": {"login": "reviewer"}, "submittedAt": "2026-01-02T00:00:00Z",
+                                           "lastEditedAt": None, "commit": {"oid": HEAD}, "comments": {"nodes": []}}]},
+                    "comments": {"nodes": [{"author": {"login": "bot"}, "createdAt": "2026-01-01T00:00:00Z",
+                                            "lastEditedAt": edited},
+                                           {"author": {"login": "dev1"}, "createdAt": "2026-01-09T00:00:00Z",
+                                            "lastEditedAt": None}]}}
+        rv.graphql = lambda query, **v: {"search": {"nodes": [node(1, None), node(2, "2026-01-03T00:00:00Z")]}}
+        rows = {r["n"]: r for r in rv.pr_list()}
+        self.assertTrue(rows[1]["reviewed_at_head"])
+        self.assertEqual((rows[1]["feedback_since"], rows[1]["needs_review"]), (False, False))
+        self.assertEqual((rows[2]["feedback_since"], rows[2]["needs_review"]), (True, True))
+
+
+class Pipeline(Base):
+    def test_seed_import(self):
+        seeds = self.tmp / "findings.json"
+        seeds.write_text(json.dumps({"repo": "acme/widgets", "prs": [
+            {"pr": 7, "head": HEAD, "verdict": "fine", "bots": {}, "findings": [
+                {"id": "pr7-f1", "file": "app/x.py", "line": 11, "kind": "process", "severity": "high", "claim": "c",
+                 "failure_scenario": "s", "matches_bot_comment": "bot finding #2"}]},
+            {"pr": 8, "head": HEAD, "verdict": "too big"}]}))
+
+        def fake_prepare(run):
+            run.meta.update(head=HEAD, checkout=str(self.tmp))
+            (run.path / "pr.diff").write_text(DIFF)
+        rv.prepare = fake_prepare
+        out = rv.import_seeds(seeds)
+        self.assertEqual([(n, bool(r)) for n, r, _ in out], [(7, True), (8, False)])
+        run = rv.latest_run(7)
+        f = run.findings()[0]
+        self.assertEqual((f["id"], f["severity"], f["seed_severity"], f["status"]), ("pr7-f1", "medium", "high", "candidate"))
+        self.assertEqual(f["matches_existing"], "bot finding #2")
+        self.assertEqual(run.meta["done"], ["review"])
+        self.assertEqual(run.plan(), rv.PLANS["medium"])
+        self.assertIsNone(rv.latest_run(8))
+
+    def test_ask_round_then_draft(self):
+        run = self.make_run(findings=[{"file": "app/x.py", "line": 11, "claim": "a"}, {"file": "app/x.py", "line": 12, "claim": "b"}])
+        run.meta["done"] = ["review"]
+        run.save()
+        rv.existing_feedback = lambda n, a, since=None: {"items": []}
+        calls = []
+
+        def fake_call(run, step, system, prompt, schema, effort="high", resume=None, log=print, L=None):
+            calls.append((step, resume))
+            run.meta["sessions"][step] = f"sid-{step}"
+            if step == "confirm" and not resume:
+                return {"verdicts": [{"id": "f1", "status": "confirmed", "severity": "medium", "verdict_reason": "traced"},
+                                     {"id": "f2", "status": "needs_ask", "verdict_reason": "intent"}],
+                        "new_findings": [], "asks": [{"question": "Is b intended?", "why": "w", "finding_ids": ["f2"]}],
+                        "notes": ""}
+            if step == "confirm":
+                return {"verdicts": [{"id": "f2", "status": "rejected", "verdict_reason": "intended"}],
+                        "new_findings": [], "asks": [], "notes": ""}
+            self.assertIn('"f1"', prompt)
+            self.assertNotIn('"f2"', prompt)
+            return {"body": "One thing.", "event": "COMMENT", "style_lessons": [],
+                    "comments": [{"path": "app/x.py", "line": 11, "body": "fix a", "finding_ids": ["f1"]}]}
+        rv.call = fake_call
+        rv.advance(run, log=lambda m: None)
+        self.assertEqual((run.meta["state"], run.meta["step"]), ("waiting", "asks"))
+        self.assertNotIn("draft", run.meta["done"])
+        with self.assertRaises(rv.ReviewError):
+            rv.answer(run, {}, log=lambda m: None)
+        rv.answer(run, {"a1": "yes, on purpose"}, log=lambda m: None)
+        rv.advance(run, log=lambda m: None)
+        self.assertEqual(calls, [("confirm", None), ("confirm", "sid-confirm"), ("draft", None)])
+        self.assertEqual([f["status"] for f in run.findings()], ["confirmed", "rejected"])
+        self.assertEqual((run.meta["step"], run.draft()["comments"][0]["line"]), ("style", 11))
+
+    def test_plans(self):
+        self.assertEqual(self.make_run().plan(), rv.LEGACY_PLAN)
+        self.assertEqual(rv.PLANS["low"], ("sweep", "filter", "draft"))
+        self.assertEqual(rv.PLANS["medium"], ("review", "confirm", "draft"))  # no small-model sweep above Low
+        with self.assertRaises(rv.ReviewError):
+            rv.new_run(7, "max")
+
+
+class Swarm(Base):
+    def setUp(self):
+        super().setUp()
+        self.smalls = [ab.Launcher("sa", "claude", "/a", "small-a"), ab.Launcher("sb", "codex", "/b", "small-b")]
+        rv.small_launchers = lambda: self.smalls
+        rv.existing_feedback = lambda n, a, since=None: {"items": []}
+
+    def swept_run(self):
+        run = self.make_run()
+        run.meta.update(plan=list(rv.PLANS["low"]))
+        (self.tmp / "app").mkdir()
+        (self.tmp / "app/x.py").write_text("".join(f"line {i}\n" for i in range(1, 20)))
+        (self.tmp / "docs").mkdir()
+        (self.tmp / "docs/new.md").write_text("one\ntwo\n")
+        rv._write(rv.rubric_file(), {"generated_at": "t", "by": "opus", "head": HEAD, "items": [
+            {"id": "R1", "rule": "No bare except in Python.", "check": "except:", "kind": "nit", "applies_to": ["**/*.py"],
+             "source": "AGENTS.md:1"}]})
+        return run
+
+    def test_rubric_refresh_starts_from_the_previous_versions(self):
+        run = self.swept_run()
+        older = self.tmp / "older.json"
+        older.write_text(json.dumps({"items": [{"id": "R9", "rule": "No Jira keys in code.", "check": "c", "kind": "nit",
+                                                "applies_to": ["**"], "source": "AGENTS.md:10"}]}))
+        rv.git = lambda *a, **k: HEAD if a[0] == "rev-parse" else ""
+        saved_gh = rv.gh
+        rv.gh = lambda *a, **k: "main\n"
+        rv.clone_dir = lambda: str(self.tmp)
+        self.addCleanup(setattr, rv, "gh", saved_gh)
+        (rv.repo_dir() / "checkouts" / "rubric" / ".git").mkdir(parents=True)
+        seen = {}
+
+        def fake_call(run, step, system, prompt, schema, effort="high", resume=None, log=print, L=None, cwd=None):
+            seen["prompt"] = prompt
+            return {"items": [{"id": "R1", "rule": "merged", "check": "c", "kind": "nit", "applies_to": ["**"],
+                               "source": "s"}], "notes": "dropped nothing"}
+        rv.call = fake_call
+        out = rv.rubric(run, log=lambda m: None, refresh=True, also=[str(older)])
+        self.assertIn("the tip of main", seen["prompt"])
+        self.assertIn("No bare except in Python.", seen["prompt"])
+        self.assertIn("No Jira keys in code.", seen["prompt"])
+        self.assertEqual(out["items"][0]["rule"], "merged")
+        self.assertEqual(len(list(rv.repo_dir().glob("rubric-*.json"))), 1)  # the old one is kept
+
+    def test_units_split_by_file_and_skip_deleted(self):
+        run = self.swept_run()
+        us = rv.units(run)
+        self.assertEqual(sorted(u["path"] for u in us), ["app/x.py", "docs/new.md"])
+        x = next(u for u in us if u["path"] == "app/x.py")
+        self.assertIn("   11| line 11", x["file"])
+        self.assertTrue(rv._applies({"applies_to": ["**/*.py"]}, "x.py") and not rv._applies({"applies_to": ["**/*.py"]}, "a.md"))
+
+    def test_sweep_merges_duplicates_and_filter_cross_checks(self):
+        run = self.swept_run()
+        prompts = []
+
+        def fake_once(run, step, L, system, prompt, schema, effort="medium"):
+            prompts.append((step, prompt))
+            if step.startswith("sweep"):
+                if "app/x.py" not in prompt.split("\n")[1]:
+                    return {"findings": []}
+                return {"findings": [
+                    {"rule_id": "R1", "line": 11 if L.name == "sa" else 12, "quote": "new = 2", "claim": "bare except",
+                     "failure_scenario": "s", "severity": "nit", "confidence": "high"},
+                    {"rule_id": "R9", "line": 99, "quote": "", "claim": "off the diff", "failure_scenario": "s",
+                     "severity": "low", "confidence": "low"}]}
+            listed = json.JSONDecoder().raw_decode(prompt[prompt.index("Findings to verify:") + 19:].lstrip())[0]
+            ids = [f["id"] for f in listed]
+            return {"verdicts": [{"id": i, "status": "confirmed" if i == ids[0] else "rejected", "severity": "nit",
+                                  "verdict_reason": f"checked by {L.name}", "matches_existing": ""} for i in ids]}
+        rv.once = fake_once
+        rv.step_sweep(run, log=lambda m: None)
+        fs = run.findings()
+        r1 = [f for f in fs if f["source"]["rule"] == "R1"]
+        self.assertEqual(len(r1), 1)  # lines 11 and 12 are the same report
+        self.assertEqual(r1[0]["also_found_by"], ["sb"] if r1[0]["source"]["launcher"] == "sa" else ["sa"])
+        general = [f for f in fs if f["source"]["rule"] == "general"]
+        self.assertEqual({f["line"] for f in general}, {0})  # an unknown rule id is general; line 99 isn't on the diff
+        self.assertIn("No bare except", next(p for st, p in prompts if "app/x.py" in p.split("\n")[1]))
+        rv.step_filter(run, log=lambda m: None)
+        fs = run.findings()
+        for f in fs:
+            verifier = f["history"][-1]["by"]
+            self.assertNotEqual(verifier, f["source"]["launcher"])  # never checked by the model that found it
+        self.assertEqual(sorted(f["status"] for f in fs).count("candidate"), 0)
+
+    def test_review_filter_triages_low_runs(self):
+        run = self.swept_run()
+        fs = [rv._finding({"file": "app/x.py", "line": 11, "claim": "c"}, HEAD, {"launcher": "sa", "stage": 1}, "s1")]
+        run.save_findings(fs)
+        son = ab.Launcher("son", "claude", "/s", "small-a")
+        rv.get_launcher = lambda name, kinds=("claude", "codex"): son
+        ab.CFG.review_filter = "son"
+        used = []
+
+        def fake_call(run, step, system, prompt, schema, effort="high", resume=None, log=print, L=None, cwd=None):
+            used.append((step, L.name))
+            return {"verdicts": [{"id": "s1", "status": "confirmed", "severity": "low", "verdict_reason": "traced"}],
+                    "new_findings": [], "asks": [], "notes": ""}
+        rv.call = fake_call
+        rv.step_filter(run, log=lambda m: None)
+        self.assertEqual(used, [("filter", "son")])
+        self.assertEqual(run.findings()[0]["status"], "confirmed")
+        self.assertEqual(rv.confirmer("filter").name, "son")
+        self.assertEqual(rv.confirmer("triage").name, "opus")
+
+    def test_review_fans_out_and_withholds_text_from_uncleared_models(self):
+        run = self.make_run()
+        L1, L2 = ab.Launcher("big", "claude", "/a", "us.anthropic.claude-opus-5-5"), ab.Launcher("fab", "claude", "/f", "fable")
+        rv.reviewers = lambda effort: [L1, L2]
+        ab.CFG.review_withhold_models = ["fable"]
+        seen = {}
+
+        def fake_call(run, step, system, prompt, schema, effort="high", resume=None, log=print, L=None):
+            seen[L.name] = prompt
+            return {"findings": [{"file": "app/x.py", "line": 11, "kind": "bug", "severity": "low", "confidence": "high",
+                                  "claim": f"from {L.name}", "failure_scenario": "s", "evidence": []}], "notes": ""}
+        rv.call = fake_call
+        rv.step_review(run, log=lambda m: None)
+        self.assertIn("<pr_description>", seen["big"])
+        self.assertNotIn("<pr_description>", seen["fab"])
+        self.assertNotIn("<existing_feedback>", seen["fab"])
+        self.assertNotIn("Findings already on file:", seen["fab"])
+        self.assertEqual(sorted(f["source"]["launcher"] for f in run.findings()), ["big", "fab"])
+        self.assertEqual(len({f["id"] for f in run.findings()}), 2)
+
+    def test_capacity_errors_are_retried(self):
+        tries, saved = [], rv.time.sleep
+        rv.time.sleep = lambda s: None
+
+        def flaky():
+            tries.append(1)
+            if len(tries) < 3:
+                raise rv.ReviewError("sol exited 1: Selected model is at capacity")
+            return "ok"
+        try:
+            self.assertEqual(rv._retrying(flaky, "sol"), "ok")
+            with self.assertRaises(rv.ReviewError):
+                rv._retrying(lambda: (_ for _ in ()).throw(rv.ReviewError("bad schema")), "sol")
+        finally:
+            rv.time.sleep = saved
+        self.assertEqual(len(tries), 3)
+
+    def test_model_specs_and_commands(self):
+        rv.get_launcher = self._saved["get_launcher"]
+        saved = ab.load_launchers
+        ab.load_launchers = lambda *a, **k: {"claude": ab.Launcher("claude", "claude", "/c"),
+                                             "codex": ab.Launcher("codex", "codex", "/x")}
+        try:
+            L = rv.get_launcher("claude:us.anthropic.claude-opus-4-5-20251101-v1:0", ("claude",))
+            self.assertEqual((L.name, L.model), ("claude", "us.anthropic.claude-opus-4-5-20251101-v1:0"))
+            self.assertEqual(rv.get_launcher("codex").model, "")
+            with self.assertRaises(rv.ReviewError):
+                rv.get_launcher("codex:gpt-6-sol", ("claude",))
+            cmd = rv._command(L, ["-p"])
+            self.assertEqual(cmd, ["claude", "-p", "--model", "us.anthropic.claude-opus-4-5-20251101-v1:0"])
+            self.assertEqual(rv._command(rv.get_launcher("claude"), ["-p"]), ["claude", "-p"])
+        finally:
+            ab.load_launchers = saved
+        if hasattr(ab, "_VIA_LAUNCHER"):  # aliases mode goes through the shell launcher
+            ab.CFG.mode = "aliases"
+            cmd = rv._command(ab.Launcher("opus-pinned", "claude", "/o", "m1", "alias"), ["-p"])
+            self.assertEqual(cmd[3:], ["_", "opus-pinned", "-p", "--model", "m1"])
+
+    def test_strict_schema(self):
+        out = rv.strict(rv.SWEEP_SCHEMA)
+        self.assertFalse(out["additionalProperties"])
+        self.assertFalse(out["properties"]["findings"]["items"]["additionalProperties"])
+
+
+class Routes(Base):
+    def board(self):
+        return type("B", (), {"token": "t"})()
+
+    def test_run_detail_and_edit(self):
+        b = self.board()
+        self.assertEqual(rv.route(b, "GET", "/api/review/run", {"pr": "7"}, {})[1], {"run": None})
+        run = self.make_run(draft={"body": "x", "event": "APPROVE", "comments": []})
+        code, out, _ = rv.route(b, "GET", "/api/review/run", {"pr": "7"}, {})
+        self.assertEqual((code, out["draft"]["body"], out["versions"]), (200, "x", 1))
+        code, out, _ = rv.route(b, "POST", "/api/review/edit", {}, {"pr": 7, "body": "y", "event": "COMMENT", "comments": [
+            {"path": "docs/new.md", "line": 2, "body": "c"}]})
+        self.assertEqual((code, out["moved"]), (200, 0))
+        self.assertEqual(rv.Run(run.path).draft()["by"], "you")
+        self.assertEqual(rv.route(b, "POST", "/api/review/revise", {}, {"pr": 7, "feedback": " "})[0], 400)
+        self.assertIsNone(rv.route(b, "GET", "/", {}, {}))
+
+    def test_older_runs_can_be_shown_and_edited(self):
+        b = self.board()
+        old = self.make_run(draft={"body": "old", "event": "APPROVE", "comments": []})
+        new = self.make_run(draft={"body": "new", "event": "COMMENT", "comments": []})
+        self.assertNotEqual(old.path.name, new.path.name)
+        out = rv.route(b, "GET", "/api/review/run", {"pr": "7"}, {})[1]
+        self.assertEqual((out["draft"]["body"], [r["id"] for r in out["runs"]]), ("new", [new.path.name, old.path.name]))
+        out = rv.route(b, "GET", "/api/review/run", {"pr": "7", "run": old.path.name}, {})[1]
+        self.assertEqual(out["draft"]["body"], "old")
+        rv.route(b, "POST", "/api/review/edit", {}, {"pr": 7, "run": old.path.name, "body": "old, edited", "comments": []})
+        self.assertEqual((rv.Run(old.path).draft()["body"], rv.Run(new.path).draft()["body"]), ("old, edited", "new"))
+        for bad in ("../pr-8/x", "20261014T000000Z"):
+            self.assertEqual(rv.route(b, "GET", "/api/review/run", {"pr": "7", "run": bad}, {})[0], 400)
+
+    def test_new_commits_rerun_carries_the_chosen_run(self):
+        seeded = self.make_run(findings=[{"file": "app/x.py", "line": 11, "claim": "from the seed"}])
+        fs = seeded.findings()
+        fs[0]["status"] = "confirmed"
+        seeded.save_findings(fs)
+        self.make_run(findings=[{"file": "app/x.py", "line": 12, "claim": "from a later run"}])
+        made = {}
+
+        def fake_new_run(n, effort, mode="full", prev=None, since=None):
+            made["prev"] = prev.path.name
+            return prev
+        saved = (rv.new_run, rv.advance)
+        rv.new_run, rv.advance = fake_new_run, lambda run, log=print: run
+        try:
+            rv.start(7, "medium", "new", base=seeded.path.name)
+        finally:
+            rv.new_run, rv.advance = saved
+        self.assertEqual(made["prev"], seeded.path.name)
+
+    def test_start_through_the_route_passes_the_run_on_screen(self):
+        b = self.board()
+        run = self.make_run()
+        got = {}
+        saved = rv.start
+        rv.start = lambda n, effort=None, rerun=None, log=print, base=None: got.update(n=n, effort=effort, rerun=rerun, base=base)
+        try:
+            code, out, _ = rv.route(b, "POST", "/api/review/start", {}, {"pr": 7, "run": run.path.name, "effort": "medium",
+                                                                         "rerun": "new"})
+            b.review_jobs.threads[7].join(5)
+        finally:
+            rv.start = saved
+        self.assertEqual((code, got), (200, {"n": 7, "effort": "medium", "rerun": "new", "base": run.path.name}))
+
+    def test_pr_list_is_cached_for_a_while_not_forever(self):
+        calls = []
+        saved = rv.pr_list
+        rv.pr_list = lambda: calls.append(1) or [{"n": 7}]
+        rv._cache.clear()
+        try:
+            b = self.board()
+            for _ in range(2):
+                self.assertEqual(rv.route(b, "GET", "/api/review/prs", {}, {})[0], 200)
+            self.assertEqual(len(calls), 1)
+            rv._cache["prs_at"] -= rv.PR_LIST_TTL + 1
+            rv.route(b, "GET", "/api/review/prs", {}, {})
+            rv.route(b, "GET", "/api/review/prs", {"refresh": "1"}, {})
+            self.assertEqual(len(calls), 3)
+        finally:
+            rv.pr_list = saved
+            rv._cache.clear()
+
+    def test_unexpected_errors_come_back_as_json(self):
+        saved = rv.latest_run
+        rv.latest_run = lambda n: 1 / 0
+        try:
+            code, out, _ = rv.route(self.board(), "GET", "/api/review/run", {"pr": "7"}, {})
+        finally:
+            rv.latest_run = saved
+        self.assertEqual(code, 500)
+        self.assertIn("ZeroDivisionError", out["error"])
+
+    def test_page_has_no_raw_html_sinks(self):
+        page = rv.page("tok")
+        self.assertIn('"token": "tok"', page)
+        self.assertNotIn("innerHTML", page.replace("never innerHTML", ""))
+
+
+if __name__ == "__main__":
+    unittest.main()

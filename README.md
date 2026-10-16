@@ -126,6 +126,54 @@ rm -rf ~/.local/share/agent-board ~/.config/agent-board ~/agent-board
 Useful flags: `--days N` files only sessions active in the last N days (default
 14), `--limit N`, `--refile`, and `--classifier claude|codex`.
 
+## PR reviews
+
+`agent-board review` (and the page's **PR reviews** link) lists open PRs by
+`review_authors` that need your review. That means no review from you at the
+current head, or someone else's review or comment that appeared or was edited
+since yours. For each one it runs an AI review that you shape and post yourself.
+Effort picks the stages:
+
+1. **Sweep (Low).** The `review_small` models check every changed file against
+   a checklist of the repo's own rules. `review_launcher` writes that checklist
+   once from the repo's AGENTS.md and CLAUDE.md files and any
+   `review_rubric_sources`. It's kept in `reviews/<repo>/rubric.json`;
+   `review rubric` shows it.
+2. **Filter (Low).** `review_filter`, a mid-size Claude launcher, verifies the
+   sweep's findings with subagents, and it may stop with questions for you. If
+   it isn't set, the small models verify each other's findings.
+3. **Review (Medium and High).** The effort's `review_reviewers` review the PR
+   in parallel. A "Review only new commits" rerun gives them the findings
+   carried from the earlier run.
+4. **Confirm (Medium and High).** `review_launcher` checks every finding against
+   the code at the head, with subagents, and it may stop with questions for you.
+5. **Draft.** Inline comments and a body. You edit them, or give feedback for
+   another draft. Lessons that apply beyond one PR go to `review-style.md`
+   next to the config.
+6. **Post.** The exact payload is shown first. Posting refuses when the head
+   has moved since the review, unless you confirm. The body opens with
+   `review_disclosure`.
+
+Every stage reads the PR's existing reviews and comments first, from people and
+bots, including edits. That way nothing already raised is raised again, and a
+bot that updates one comment in place is still followed. Finding nothing and
+asking nothing are normal results.
+
+Claude stages run with `--safe-mode` and credential paths denied. The
+investigating stages get only Read, Grep, Glob and Agent, and the small models
+get no tools. Codex stages run with a read-only sandbox and
+`--ignore-user-config`. No model can post. A model that isn't in
+`pii_cleared_models` gets the diff and the code, not the PR description or the
+existing reviews. `agent-board review -h` lists the subcommands.
+
+Each model role in config is a launcher, optionally with a model after a
+colon: `claude:opus` runs `claude --model opus`, and `codex:gpt-6-sol` runs
+`codex -m gpt-6-sol`. The defaults are `claude:opus` for `review_launcher`,
+`claude:haiku` for the sweep and `claude:sonnet` for Low's filter. Set
+`review_repo` (or `github_repo`), `review_clone` (a local clone, used for
+detached checkouts of each PR head) and `review_authors` to get started. It
+needs `gh`, logged in.
+
 ## On the page
 
 - Sessions are grouped by workstream, most recent first.
@@ -171,6 +219,7 @@ first run, only sessions with new activity are re-filed.
   - `sessions.json` is the scan and filing cache.
   - `overrides.json` holds your edits.
   - `board.html` is the static copy of the page.
+  - `reviews/` holds review runs and the PR checkouts.
 
 ## Security
 
