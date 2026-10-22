@@ -21,6 +21,20 @@ It's plain Python with no dependencies beyond the standard library. It's
 developed on macOS. It should work on Linux, but it hasn't been tested there
 much.
 
+These screenshots use made-up data.
+
+**Sessions**
+
+![The sessions page: sessions grouped by workstream, with status, summary, next step and Resume](docs/screenshots/sessions.png)
+
+**PR reviews**
+
+![The PR reviews page: open PRs that need your review, with each one's AI review run](docs/screenshots/reviews.png)
+
+**Tickets**
+
+![The Tickets page: tickets grouped by whether they need you, with their PRs, sessions and a Spawn button](docs/screenshots/tickets.png)
+
 ## Setup
 
 ### 1. Check the prerequisites
