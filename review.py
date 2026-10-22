@@ -1790,6 +1790,7 @@ details > summary { cursor:pointer; color:var(--muted); font-size:12px; margin-t
 <header>
   <h1>PR reviews</h1>
   <a href="/">Sessions</a>
+  <a href="/tickets">Tickets</a>
   <button class="chip" id="needOnly" aria-pressed="true">Needs your review</button>
   <button class="chip" id="drafts" aria-pressed="false">Show draft PRs</button>
   <button class="chip" id="reload">Refresh from GitHub</button>

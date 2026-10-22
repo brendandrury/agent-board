@@ -1,16 +1,25 @@
 # agent-board
 
 If you run a lot of Claude Code and Codex sessions, the terminal tabs pile up
-and it gets hard to tell which ones still matter. agent-board reads every
-session on your machine and has a small model file each one under a workstream
-with a status: open, waiting, done or dropped. It then serves a local page where
-one click resumes any session in the right directory with the right command. You
-can close every tab at the end of the day and pick up where you left off the
-next morning.
+and it gets hard to tell which ones still matter. agent-board is a local web
+page with three views of that work:
 
-It is a single Python file with no dependencies beyond the standard library.
-It's developed on macOS. It should work on Linux, but it hasn't been tested
-there much.
+- **Sessions.** It reads every session on your machine and has a small model
+  file each one under a workstream with a status: open, waiting, done or
+  dropped. One click resumes any session in the right directory with the right
+  command. You can close every tab at the end of the day and pick up where you
+  left off the next morning.
+- **PR reviews.** The open PRs that need your review, each with an AI review
+  pipeline whose findings and draft you shape and post yourself.
+- **Tickets.** Your Jira tickets, each with the PRs and sessions working on it
+  and whether it needs you now, plus a button that starts a session for a
+  ticket in a fresh worktree. A model can also sort the tickets by how well they
+  fit a project, and propose tickets for work your agents' memory files mention
+  but no ticket covers.
+
+It's plain Python with no dependencies beyond the standard library. It's
+developed on macOS. It should work on Linux, but it hasn't been tested there
+much.
 
 ## Setup
 
@@ -126,6 +135,30 @@ rm -rf ~/.local/share/agent-board ~/.config/agent-board ~/agent-board
 Useful flags: `--days N` files only sessions active in the last N days (default
 14), `--limit N`, `--refile`, and `--classifier claude|codex`.
 
+- `agent-board review ...` runs the PR review pipeline from the command line
+  (`agent-board review -h`).
+- `agent-board tickets list` prints the Tickets page, and
+  `agent-board tickets spawn KEY` starts a session for a ticket.
+
+## On the sessions page
+
+- Sessions are grouped by workstream, most recent first.
+- Status chips filter the list; open and waiting are shown by default.
+- "Live in a terminal" shows only the sessions that are running right now.
+- "Hide before" hides sessions whose last message is older than the date you
+  pick. The date is remembered between visits.
+- The search box matches titles, summaries, PR numbers, issue keys and paths.
+- Each card can resume its session in a new tab of your front Terminal or iTerm
+  window. If the session is already open in one of them, it brings that tab
+  forward instead. Terminal.app has no scripting command for tabs, so
+  agent-board presses Cmd-T for you. That needs the app running agent-board to
+  be allowed under Privacy & Security > Accessibility; without it, or with
+  `new_tab = false`, you get a new window.
+- Each card can also copy its resume command, set its status, or move it to
+  another workstream.
+- Your edits are kept apart from the model's filing. A status you set holds
+  until the session has new activity.
+
 ## PR reviews
 
 `agent-board review` (and the page's **PR reviews** link) lists open PRs by
@@ -174,24 +207,105 @@ colon: `claude:opus` runs `claude --model opus`, and `codex:gpt-6-sol` runs
 detached checkouts of each PR head) and `review_authors` to get started. It
 needs `gh`, logged in.
 
-## On the page
+## Tickets
 
-- Sessions are grouped by workstream, most recent first.
-- Status chips filter the list; open and waiting are shown by default.
-- "Live in a terminal" shows only the sessions that are running right now.
-- "Hide before" hides sessions whose last message is older than the date you
-  pick. The date is remembered between visits.
-- The search box matches titles, summaries, PR numbers, issue keys and paths.
-- Each card can resume its session in a new tab of your front Terminal or iTerm
-  window. If the session is already open in one of them, it brings that tab
-  forward instead. Terminal.app has no scripting command for tabs, so
-  agent-board presses Cmd-T for you. That needs the app running agent-board to
-  be allowed under Privacy & Security > Accessibility; without it, or with
-  `new_tab = false`, you get a new window.
-- Each card can also copy its resume command, set its status, or move it to
-  another workstream.
-- Your edits are kept apart from the model's filing. A status you set holds
-  until the session has new activity.
+The **Tickets** page (`agent-board tickets list` on the command line) lists the
+tickets `tickets_jql` finds, one card each, with the PRs and sessions working on
+them. PRs are matched by the ticket key in their title or branch name. Sessions
+are matched by the keys their filing found, and by their branch, title and
+directory. A session whose filing names many keys is matched only by those
+last three, so one broad session doesn't attach itself to every ticket.
+
+Cards are grouped into **Needs you**, **In flight**, **Not started** and
+**Hidden**. A ticket needs you when you've flagged it, when one of its sessions
+active in the last week needs your reply, or when one of its open PRs is
+approved and mergeable, has changes requested, is failing CI or has
+conflicts. Your own open PRs that match no ticket on the page are listed at
+the bottom. Each card has a notes box for decisions and who you're waiting on.
+
+**Spawn session** fetches the default branch of `tickets_clone` (or
+`review_clone`) and cuts a worktree for the ticket from it, named after the key
+and summary, under `<clone>/.claude/worktrees` (or `tickets_worktrees`). If
+the ticket already has a worktree, it's reused. Then it opens the launcher
+picked beside the button there in a terminal, with a first prompt from
+`tickets_seed`. The picker offers `tickets_launchers` (each a launcher, or
+`launcher:model`), or every launcher if that's unset, with `tickets_launcher`
+as the default; the page remembers your last pick. The default prompt asks the
+session to investigate and report before changing anything.
+
+Jira is read one of two ways:
+
+- **Through the Atlassian MCP** (the default). `tickets_fetcher`, a small
+  model such as `claude:haiku`, calls the MCP's JQL search through your
+  launcher, so the MCP's login stays inside Claude Code. The session gets no
+  built-in tools, and every MCP tool except the search is denied with
+  `--disallowedTools`, which holds even when a launcher skips permission
+  prompts. If a session starts with any other tool available, it's stopped
+  before the model acts and restarted with that tool denied. Ticket data is
+  read from the search results in the session's event stream, never from the
+  model's reply. A result too big for the model is read from the file Claude
+  Code saves it to. Each page of 50 tickets costs well under a cent with Haiku.
+  Set `tickets_mcp_tool` if your Jira MCP's search tool has a different name.
+- **Over the REST API.** Set `jira_email` and put an API token in
+  `JIRA_API_TOKEN`.
+
+PRs come from `review_repo` (or `github_repo`) through `gh`. The list refreshes
+in the background when the page loads, if it's older than `tickets_ttl` (15
+minutes by default), and whenever you click Refresh. To get started, set
+`tickets_jql`, `review_repo` and `tickets_clone`.
+
+### Scope views
+
+A scope view sorts the loaded tickets by how well they fit a piece of work you
+describe, such as a migration that spans several epics. Views go in your
+config, after the top-level settings:
+
+```toml
+[tickets_views."Search rewrite"]
+description = "Moving search to the new index: the indexer, query API, ranking parity tests and the cutover. Not unrelated UI work."
+sources = ["~/notes/search-rewrite.md"]
+```
+
+Pick a view in the header and click **Evaluate ticket fit**.
+`tickets_triage_model` (Haiku by default) reads each ticket's summary and
+description, the view's description and its source notes. It files each ticket
+as high confidence (clearly in scope), low (plausible, or not enough to go on)
+or zero (unrelated or excluded), with a one-line reason. A ticket that's new, or
+has changed since the evaluation, stays under **Unevaluated** instead of being
+counted out. The grouping is local; nothing is written to Jira.
+
+### Finding missing tickets
+
+**Find missing tickets from agent memory** reads the memory files your agents
+keep and proposes tickets for work that none of the loaded tickets covers. The
+paths default to `tickets_memory_paths`: Claude Code's
+`~/.claude/projects/*/memory`, Codex's `~/.codex/memories` and OpenCode's
+`~/.config/opencode/AGENTS.md`, plus `~/.claude/memory` and
+`~/.config/opencode/memory` if you keep notes there. You can change the paths,
+the scope and the model in the form before each scan.
+
+Each proposal comes with a description, acceptance criteria, the loaded tickets
+it relates to, and the exact lines from your notes it's based on. A proposal
+whose quote isn't in the file it cites is dropped, and so is one whose title
+matches a loaded ticket. The scan only compares against the tickets on the page,
+so it can't prove a ticket is missing from the whole tracker: treat proposals as
+leads.
+
+To file some, tick them and click **Open ticket creator**. That opens an
+interactive session of `tickets_creator_model` (a Claude or Codex
+`launcher[:model]`) in a terminal, with the proposals as its first prompt. It's
+told to check the live tracker for duplicates, show you the exact tickets, and
+create nothing until you approve them. `tickets_creator_guidance` adds your
+tracker's conventions, such as the project, issue type and parent.
+
+Evaluations and scans are headless Claude calls with no tools and no MCP
+servers, run from an empty directory. Secrets and personal data are scrubbed
+from what goes in and what comes back. Each job is capped by
+`tickets_analysis_budget_usd` ($3 by default, at most $1 per call). Only
+`.md`, `.txt` and `.rst` files are read, up to 200 files and 600,000
+characters. Your home directory, whole tool profiles, credential directories
+and session-log folders are skipped. Models in `review_withhold_models` can't
+be used to read memory. Nothing runs until you click.
 
 ## What the classifier sees
 
@@ -220,6 +334,10 @@ first run, only sessions with new activity are re-filed.
   - `overrides.json` holds your edits.
   - `board.html` is the static copy of the page.
   - `reviews/` holds review runs and the PR checkouts.
+  - `tickets.json` is the last ticket fetch, and `tickets-notes.json` holds your
+    notes, flags and hidden tickets.
+  - `tickets-triage.json` and `tickets-scans.json` hold scope evaluations and
+    memory scans, and `ticket-drafts/` holds the ticket creator's prompts.
 
 ## Security
 
