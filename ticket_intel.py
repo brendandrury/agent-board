@@ -211,29 +211,43 @@ def analysis_launcher(spec):
     return L
 
 
+def scrub_output(value):
+    """Scrub individual fields without destroying a structured response's JSON."""
+    if isinstance(value, str):
+        return ab.scrub(value, True)
+    if isinstance(value, list):
+        return [scrub_output(v) for v in value]
+    if isinstance(value, dict):
+        return {k: scrub_output(v) for k, v in value.items()}
+    return value
+
+
 class Analyst:
-    def __init__(self, spec):
+    def __init__(self, spec, budget=None, system=SYSTEM, omit_env=()):
         self.L = analysis_launcher(spec)
         self.cost = 0.0
-        self.budget = float(ab.CFG.tickets_analysis_budget_usd)
+        self.system = system
+        self.omit_env = omit_env
+        self.budget = float(ab.CFG.tickets_analysis_budget_usd if budget is None else budget)
         if not math.isfinite(self.budget) or not 0 < self.budget <= 50:
-            raise ValueError("tickets_analysis_budget_usd must be between 0 and 50")
+            raise ValueError("Analysis budget must be between 0 and 50 USD")
 
     def ask(self, prompt, schema):
         import review
         remaining = self.budget - self.cost
         if remaining < 0.01:
-            raise ValueError("Analysis budget exhausted; narrow the memory paths or raise tickets_analysis_budget_usd")
+            raise ValueError("Analysis budget exhausted; narrow the input or increase this job's analysis budget")
         if len(prompt) > 260000:
             raise ValueError("Analysis prompt too large; narrow the loaded JQL, scope notes or memory paths")
         args = ["-p", "--safe-mode", "--tools", "", "--strict-mcp-config", "--no-session-persistence",
-                "--effort", "low", "--output-format", "json", "--system-prompt", SYSTEM,
+                "--effort", "low", "--output-format", "json", "--system-prompt", self.system,
                 "--json-schema", json.dumps(schema), "--max-budget-usd", str(min(1.0, remaining))]
         # Empty cwd prevents repository instructions from leaking into analysis. The tool-less system prompt
         # replaces profile instructions; strict MCP disables all connectors, including Jira writes.
         with tempfile.TemporaryDirectory(prefix="agent-board-analysis-") as td:
+            env = {k: v for k, v in os.environ.items() if k not in self.omit_env}
             r = subprocess.run(review._command(self.L, args), input=ab.scrub(prompt, True), capture_output=True,
-                               text=True, timeout=600, cwd=td)
+                               text=True, timeout=600, cwd=td, env=env)
         try:
             result = json.loads(r.stdout)
         except ValueError:
@@ -242,7 +256,7 @@ class Analyst:
         if r.returncode or result.get("is_error") or not isinstance(result.get("structured_output"), dict):
             raise ValueError("Analysis failed: " + clean(result.get("result") or result.get("subtype") or "no structured output", 300))
         # Scrub output too: hallucinated secrets/PII must not end up in the browser or a creator prompt.
-        return json.loads(ab.scrub(json.dumps(result["structured_output"]), True))
+        return scrub_output(result["structured_output"])
 
 
 def triage(view_id, log):

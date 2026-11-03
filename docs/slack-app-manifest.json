@@ -1,0 +1,17 @@
+{
+  "display_information": {
+    "name": "Agent Board",
+    "description": "Read-only personal work inbox for a local agent-board",
+    "background_color": "#1f6feb"
+  },
+  "oauth_config": {
+    "scopes": {
+      "user": ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "users:read"]
+    }
+  },
+  "settings": {
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": false,
+    "token_rotation_enabled": false
+  }
+}

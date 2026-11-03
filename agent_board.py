@@ -51,6 +51,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 HOME = Path.home()
+# Capture this app's optional Slack credential before any child is launched.
+# It must not become ambient access for a classifier, reviewer, or terminal.
+_SLACK_TOKEN = os.environ.pop("AGENT_BOARD_SLACK_TOKEN", "")
 CONFIG_FILE = Path(os.environ.get("AGENT_BOARD_CONFIG")
                    or Path(os.environ.get("XDG_CONFIG_HOME") or HOME / ".config") / "agent-board/config.toml")
 STATE_DIR = Path(os.environ.get("AGENT_BOARD_STATE")
@@ -133,15 +136,29 @@ class Config:
     tickets_memory_paths: list = dataclasses.field(default_factory=lambda: [
         "~/.claude/projects/*/memory", "~/.claude/memory", "~/.codex/memories",
         "~/.config/opencode/AGENTS.md", "~/.config/opencode/memory"])
+    # Home, personal planning, and opt-in read-only Slack intake. No credentials in config.
+    home_title: str = "Your work"
+    home_analysis_model: str = "claude:haiku"
+    home_analysis_budget_usd: float = 1.0
+    slack_source: str = ""  # empty (off), api (environment token), or mcp (read-only stdio server)
+    slack_mcp_command: list = dataclasses.field(default_factory=list)
+    slack_user_id: str = ""  # required for MCP; API discovers it with auth.test
+    slack_user_name: str = ""  # optional Slack display name, especially for text-only connectors
+    slack_queries: list = dataclasses.field(default_factory=lambda: ["to:me", "<@{user_id}>"])
+    slack_days: int = 7
+    slack_max_messages: int = 40
+    slack_max_threads: int = 12
 
     def finish(self):
+        if self.slack_source not in ("", "api", "mcp"):
+            raise ValueError('slack_source must be "", "api", or "mcp"')
         if self.classifier not in ("claude", "codex"):
             raise ValueError('classifier must be "claude" or "codex"')
         if self.claude_isolation not in ("auto", "bare", "restricted", "none"):
             raise ValueError('claude_isolation must be "auto", "bare", "restricted" or "none"')
         for name in ("pii_cleared_models", "review_authors", "review_small", "review_rubric_sources",
                      "review_rubric_branches", "review_withhold_models", "tickets_launchers",
-                     "tickets_memory_paths"):
+                     "tickets_memory_paths", "slack_queries"):
             if isinstance(getattr(self, name), str):
                 setattr(self, name, [getattr(self, name)])
         if self.classifier_model is None:
@@ -872,6 +889,8 @@ article.open-full .clamp { -webkit-line-clamp:unset; }
 <body>
 <header>
   <h1>Agent sessions</h1>
+  <a class="chip" id="home" href="/" hidden>Home</a>
+  <a class="chip" id="planner" href="/planner" hidden>Planner</a>
   <div id="chips"></div>
   <button class="chip" id="liveOnly" aria-pressed="false"></button>
   <span class="since">
@@ -1059,6 +1078,8 @@ if (DATA.served) {
   $("refresh").hidden = false;
   $("reviews").hidden = false;
   $("tickets").hidden = false;
+  $("home").hidden = false;
+  $("planner").hidden = false;
   $("refresh").addEventListener("click", async () => {
     try { await api("/api/refresh", {}); poll(); } catch (e) { alert(e.message); }
   });
@@ -1274,13 +1295,14 @@ class Board:
                 return True
 
             def _review(self, method, body=None):
-                """Hand /reviews and /api/review/* to review.py, and /tickets and
-                /api/tickets* to tickets.py; False if it's neither."""
+                """Dispatch Home, Planner, Reviews and Tickets routes to their modules."""
                 url = urllib.parse.urlsplit(self.path)
                 if url.path == "/reviews" or url.path.startswith("/api/review/"):
                     import review as mod
                 elif url.path == "/tickets" or url.path == "/api/tickets" or url.path.startswith("/api/tickets/"):
                     import tickets as mod
+                elif url.path in ("/", "/home", "/planner", "/api/home") or url.path.startswith("/api/home/"):
+                    import home as mod
                 else:
                     return False
                 if self._allowed(url.path.startswith("/api/")):
@@ -1292,7 +1314,7 @@ class Board:
             def do_GET(self):
                 if self._review("GET"):
                     return
-                if self.path == "/":
+                if self.path == "/sessions":
                     if self._allowed(False):
                         page = render_html(load_state(), board.launchers, True, board.token, board.args.classifier)
                         self._send(200, page, "text/html")
@@ -1425,6 +1447,9 @@ def main():
     if sys.argv[1:2] == ["tickets"]:
         import tickets
         return tickets.main(sys.argv[2:])
+    if sys.argv[1:2] == ["slack"]:
+        import slack_source
+        return slack_source.main(sys.argv[2:])
     ap = argparse.ArgumentParser(prog="agent-board", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("command", nargs="?", default="open", choices=["open", "update", "serve"])
     ap.add_argument("--classifier", default=CFG.classifier, choices=["claude", "codex"],

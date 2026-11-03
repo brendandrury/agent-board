@@ -692,7 +692,9 @@ details > summary { cursor:pointer; color:var(--muted); font-size:12px; margin-t
 <body>
 <header>
   <h1>Tickets</h1>
-  <a href="/">Sessions</a>
+  <a href="/">Home</a>
+  <a href="/planner">Planner</a>
+  <a href="/sessions">Sessions</a>
   <a href="/reviews">PR reviews</a>
   <select class="chip" id="ticketView" aria-label="Ticket view"><option value="">All tickets</option></select>
   <button class="chip" id="mine" aria-pressed="false">Assigned to me</button>

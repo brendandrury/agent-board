@@ -1,6 +1,23 @@
 # agent-board config. Copy to ~/.config/agent-board/config.toml and edit.
 # Every setting is optional.
 
+# Home and planning. Outcomes and Slack excerpts are local state, not repo files.
+# home_title = "Your work"
+# home_analysis_model = "claude:haiku"
+# home_analysis_budget_usd = 1.0
+
+# Optional Slack. Follow docs/slack-setup.md, then `agent-board slack setup`.
+# These are TOP-LEVEL settings; put them before any [tables]. Never add tokens here.
+# slack_source = "api"                   # "api", "mcp", or "" (off)
+# slack_queries = ["to:me", "<@{user_id}>"]
+# Add "from:me" to include outgoing requests you may be waiting on.
+# slack_days = 7
+# slack_max_messages = 40
+# slack_max_threads = 12
+# slack_mcp_command = ["uv", "run", "/path/to/read-only-slack-server.py"]
+# slack_user_id = "U0123456789"           # MCP only; your profile's Copy member ID
+# slack_user_name = "Your Name"          # optional; disambiguates display names in thread text
+
 # Sessions are read from ~/.claude and ~/.codex, or $CLAUDE_CONFIG_DIR and
 # $CODEX_HOME if set, and resumed with `claude --resume <id>` / `codex resume <id>`.
 

@@ -1677,6 +1677,36 @@ _cache = {}
 PR_LIST_TTL = 300  # seconds a page load reuses the PR list; "Refresh from GitHub" always refetches
 
 
+def cached_prs(refresh=False, fetch=True, hints=None):
+    """One PR snapshot for Reviews and Home; Home's passive read never fetches."""
+    repo = repo_name()
+    scope = (repo, tuple(cfg().review_authors), str(ab.STATE_DIR))
+    if _cache.get("scope") != scope:
+        _cache.clear()
+        _cache["scope"] = scope
+    stale = time.time() - _cache.get("prs_at", 0) > PR_LIST_TTL
+    if fetch and (refresh or stale):
+        _cache.update(prs=pr_list(), prs_at=time.time(), me=me())
+        stale = False
+    # Reapply local Slack hints on cache hits too. Never change needs_review:
+    # merged PRs are absent, reviewed heads stay reviewed, and old asks don't
+    # prioritize new commits after the user has already responded.
+    if hints is None:
+        import home
+        hints = home.review_requests(repo)
+    rows = []
+    for p in _cache.get("prs", []):
+        reviewed = datetime.datetime.fromisoformat(p["last_review"]).timestamp() if p.get("last_review") else 0
+        asks = [h for h in hints.values() if p["n"] in h["prs"] and h["at"] > reviewed and p.get("needs_review")]
+        rows.append(p | {"slack_requests": sorted(asks, key=lambda h: h["at"], reverse=True)})
+    rows.sort(key=lambda p: (bool(p["slack_requests"]), max((h["at"] for h in p["slack_requests"]), default=0),
+                             p.get("updated", "")), reverse=True)
+    at = _cache.get("prs_at", 0)
+    return {"prs": rows, "me": _cache.get("me", ""), "repo": repo, "configured": True,
+            "fetched_at": datetime.datetime.fromtimestamp(at, datetime.UTC).isoformat(timespec="seconds") if at else "",
+            "stale": stale}
+
+
 def route(board, method, path, query, body):
     """(status, payload, content type) for a /reviews request, or None."""
     if not (path == "/reviews" or path.startswith("/api/review/")):
@@ -1686,15 +1716,13 @@ def route(board, method, path, query, body):
         if method == "GET" and path == "/reviews":
             return 200, page(board.token), "text/html"
         if method == "GET" and path == "/api/review/prs":
-            if query.get("refresh") or time.time() - _cache.get("prs_at", 0) > PR_LIST_TTL:
-                _cache["prs"], _cache["prs_at"] = pr_list(), time.time()
-            rows = _cache["prs"]
-            for r in rows:
+            data = cached_prs(refresh=bool(query.get("refresh")))
+            for r in data["prs"]:
                 run = latest_run(r["n"])
                 r["run"] = summary(run) if run else None
                 r["msg"] = jobs.msgs.get(r["n"], "")
                 r["busy"] = jobs.busy(r["n"])
-            return 200, {"prs": rows, "me": me(), "repo": repo_name()}, "application/json"
+            return 200, data, "application/json"
         n = int(query.get("pr") or body.get("pr") or 0)
         if not n:
             return 400, {"error": "pr is required"}, "application/json"
@@ -1789,7 +1817,9 @@ details > summary { cursor:pointer; color:var(--muted); font-size:12px; margin-t
 <body>
 <header>
   <h1>PR reviews</h1>
-  <a href="/">Sessions</a>
+  <a href="/">Home</a>
+  <a href="/planner">Planner</a>
+  <a href="/sessions">Sessions</a>
   <a href="/tickets">Tickets</a>
   <button class="chip" id="needOnly" aria-pressed="true">Needs your review</button>
   <button class="chip" id="drafts" aria-pressed="false">Show draft PRs</button>
@@ -1882,10 +1912,12 @@ function card(pr) {
   if (pr.reviewed_at_head) badges.push(el("span", {class: "badge ok"}, "you reviewed this head"));
   else if (!pr.draft) badges.push(el("span", {class: "badge need"}, pr.last_review ? "new commits since your review" : "not reviewed by you"));
   if (pr.feedback_since) badges.push(el("span", {class: "badge need", title: "Someone else's review or comment appeared or was edited " + ago(pr.feedback_at)}, "new or edited feedback since your review"));
-  return el("article", {},
+  if (pr.slack_requests?.length) badges.push(el("span", {class: "badge need"}, "requested in Slack"));
+  return el("article", {id: "pr-" + pr.n},
     el("div", {}, el("span", {class: "t"}, el("a", {href: pr.url, target: "_blank", rel: "noopener"}, "#" + pr.n + " " + pr.title)), ...badges),
     el("div", {class: "meta"}, el("span", {}, pr.author), el("span", {}, "into " + pr.base), el("span", {class: "loc"}, pr.head.slice(0, 8)),
       el("span", {}, "updated " + ago(pr.updated)), runLine(pr), pr.msg ? el("span", {}, pr.msg) : null),
+    ...(pr.slack_requests || []).map(s => el("p", {class: "small"}, s.url ? el("a", {href: s.url, target: "_blank", rel: "noopener"}, "Slack request") : "Slack request", " · ", s.quote)),
     el("div", {class: "actions"}, effort, rerun, gen, openBtn),
     ui.open.has(pr.n) && ui.details[pr.n] ? detailView(pr, ui.details[pr.n]) : null);
 }
@@ -2055,12 +2087,17 @@ function cardFor(pr) {
 // The run whose details are on screen; actions go to it, not necessarily the latest.
 function shown(n) { const d = ui.details[n]; return d && d.run ? d.run.id : ""; }
 async function loadDetail(n) { ui.details[n] = await api("/api/review/run?pr=" + n + (ui.selected[n] ? "&run=" + encodeURIComponent(ui.selected[n]) : "")); }
+let initialAnchor = true;
 async function loadPrs(refresh) {
   const j = await api("/api/review/prs" + (refresh ? "?refresh=1" : ""));
   ui.prs = j.prs; ui.me = j.me; ui.repo = j.repo;
   await Promise.all([...ui.open].map(loadDetail));
   $("statusLine").textContent = j.repo + " · open PRs by the configured authors · as " + j.me;
   render();
+  if (initialAnchor) {
+    initialAnchor = false;
+    if (/^#pr-\d+$/.test(location.hash)) document.getElementById(location.hash.slice(1))?.scrollIntoView();
+  }
   return j;
 }
 let polling = false;

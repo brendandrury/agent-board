@@ -10,6 +10,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -60,6 +61,11 @@ deleted file mode 100644
 class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(dir=_tmp))
+        # Other test modules may import agent_board before this one's env setup.
+        # Give each fixture its own state rather than depending on import order.
+        self._state = mock.patch.object(ab, "STATE_DIR", self.tmp / "state")
+        self._state.start()
+        self.addCleanup(self._state.stop)
         ab.CFG = ab.Config(review_repo="acme/widgets", review_launcher="opus", review_authors=["dev1"]).finish()
         self._saved = {k: getattr(rv, k) for k in ("me", "fetch_pr", "graphql", "prepare", "call", "once", "launcher",
                                                    "existing_feedback", "small_launchers", "reviewers", "_related",
@@ -79,7 +85,6 @@ class Base(unittest.TestCase):
     def tearDown(self):
         for k, v in self._saved.items():
             setattr(rv, k, v)
-        shutil.rmtree(Path(os.environ["AGENT_BOARD_STATE"]) / "reviews", ignore_errors=True)
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def make_run(self, findings=(), draft=None):

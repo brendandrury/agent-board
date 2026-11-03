@@ -2,8 +2,14 @@
 
 If you run a lot of Claude Code and Codex sessions, the terminal tabs pile up
 and it gets hard to tell which ones still matter. agent-board is a local web
-page with three views of that work:
+page that connects your plans, incoming requests, and agent work:
 
+- **Home.** Your current priorities, requests needing a response, active sessions,
+  external dependencies, and changes since you last checked. Optional read-only
+  Slack intake suggests requests from DMs, mentions, and selected searches.
+- **Planner.** Outcomes in Now, Next, and Later, each with a definition of done,
+  next step, optional target date, tickets, and reference links. Track what is
+  waiting on reviews, compliance, specifications, QA, access, or another team.
 - **Sessions.** It reads every session on your machine and has a small model
   file each one under a workstream with a status: open, waiting, done or
   dropped. One click resumes any session in the right directory with the right
@@ -151,10 +157,14 @@ Useful flags: `--days N` files only sessions active in the last N days (default
 
 - `agent-board review ...` runs the PR review pipeline from the command line
   (`agent-board review -h`).
+- `agent-board slack setup|test` connects and checks optional read-only Slack access.
 - `agent-board tickets list` prints the Tickets page, and
   `agent-board tickets spawn KEY` starts a session for a ticket.
 
 ## On the sessions page
+
+The front page is **Home**. The session browser is at `/sessions`; the planner
+is at `/planner`. Existing session state and resume commands are unchanged.
 
 - Sessions are grouped by workstream, most recent first.
 - Status chips filter the list; open and waiting are shown by default.
@@ -172,6 +182,59 @@ Useful flags: `--days N` files only sessions active in the last N days (default
   another workstream.
 - Your edits are kept apart from the model's filing. A status you set holds
   until the session has new activity.
+
+## Home and planning
+
+Home reads your existing session filings and cached ticket/PR evidence. It does
+not call a model or contact Slack, Jira, or GitHub when you open it. **Rescan
+sessions** scans for new sessions without classifying them. Use the
+Sessions page to refile stale summaries and the Tickets/Reviews pages to refresh
+their external evidence; Home displays the ticket cache's timestamp.
+
+**Pending reviews** shares the Reviews page's GitHub snapshot and its existing
+`needs_review` logic, not a separate Slack task list. **Refresh reviews** on Home
+refreshes that same queue. Home shows when its snapshot is stale; after a server
+restart, load Reviews or refresh once to populate it. A Slack review request with
+an explicit PR link in the configured repository becomes a priority signal on
+Reviews, with its Slack evidence attached. It cannot add a merged PR or override
+an already-reviewed head. Requests older than your last review do not prioritize
+subsequent commits; new commits and feedback keep the existing review labels.
+The queue still covers `review_authors`, not every author in the repository.
+Other repositories and outgoing review dependencies remain ordinary Slack items.
+Previously accepted commitments are kept until you close them yourself.
+
+**Add outcome** records what you want to accomplish, what done means, and the
+next action. Keep a few outcomes in **Now**, upcoming work in **Next**, and
+uncommitted possibilities in **Later**. Ticket keys link outcomes to cached
+tickets and recent active sessions. Target dates are optional and entered by
+you, never guessed by the model. Completing an outcome does not close Jira
+tickets or clear its external dependencies.
+
+**Waiting on others** is separate from **Needs your response**. Add a dependency
+with an owner/team, category, affected outcome or ticket, waiting-since date,
+optional follow-up date, and source link. The board shows age and due follow-ups;
+it does not infer an overdue promise merely because someone has been quiet.
+Mark dependencies cleared yourself. The planner retains cleared dependencies
+and completed outcomes, with reopen controls.
+
+For the Slack inbox, follow [Slack setup](docs/slack-setup.md). **Refresh Slack**
+reads only configured searches and bounded thread context, then sends changed,
+scrubbed evidence to a tool-less small model. Suggestions retain exact evidence
+and source links. Accept, dismiss, mark done, link to an outcome, or choose
+**Track dependency** to track an external dependency. New evidence never
+overwrites your disposition. A possible resolution is a suggestion, not an
+automatic close. Search/thread caps and missing context remain visible.
+
+**What changed** combines local planning changes with changes to attention
+signals since **Mark seen**. It is not an exhaustive audit log. The first visit
+has no baseline for external signals until you mark it seen.
+
+Planning data and Slack excerpts are stored in `home.json` under the local state
+directory, with mode `600`; they do not belong in a public repository. Concurrent
+edits are version checked, and planner writes are locked across board processes.
+Slack scans run inside the server and stop if it exits; completed scan results
+are durable, and unchanged evidence is cached. No unattended scheduler, Slack
+posting, automatic ticket creation, or automatic commitment acceptance is enabled.
 
 ## PR reviews
 
