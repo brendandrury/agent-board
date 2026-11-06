@@ -148,6 +148,7 @@ class Config:
     slack_days: int = 7
     slack_max_messages: int = 40
     slack_max_threads: int = 12
+    message_pair_models: list = dataclasses.field(default_factory=list)  # opt-in launcher[:model] allowlist
 
     def finish(self):
         if self.slack_source not in ("", "api", "mcp"):
@@ -891,6 +892,7 @@ article.open-full .clamp { -webkit-line-clamp:unset; }
   <h1>Agent sessions</h1>
   <a class="chip" id="home" href="/" hidden>Home</a>
   <a class="chip" id="planner" href="/planner" hidden>Planner</a>
+  <a class="chip" id="messages" href="/messages" hidden>Messages</a>
   <div id="chips"></div>
   <button class="chip" id="liveOnly" aria-pressed="false"></button>
   <span class="since">
@@ -1080,6 +1082,7 @@ if (DATA.served) {
   $("tickets").hidden = false;
   $("home").hidden = false;
   $("planner").hidden = false;
+  $("messages").hidden = false;
   $("refresh").addEventListener("click", async () => {
     try { await api("/api/refresh", {}); poll(); } catch (e) { alert(e.message); }
   });
@@ -1303,6 +1306,8 @@ class Board:
                     import tickets as mod
                 elif url.path in ("/", "/home", "/planner", "/api/home") or url.path.startswith("/api/home/"):
                     import home as mod
+                elif url.path in ("/messages", "/agents", "/api/messages") or url.path.startswith("/api/messages/"):
+                    import messages as mod
                 else:
                     return False
                 if self._allowed(url.path.startswith("/api/")):
@@ -1450,6 +1455,9 @@ def main():
     if sys.argv[1:2] == ["slack"]:
         import slack_source
         return slack_source.main(sys.argv[2:])
+    if sys.argv[1:2] == ["messages"]:
+        import messages
+        return messages.main(sys.argv[2:])
     ap = argparse.ArgumentParser(prog="agent-board", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("command", nargs="?", default="open", choices=["open", "update", "serve"])
     ap.add_argument("--classifier", default=CFG.classifier, choices=["claude", "codex"],

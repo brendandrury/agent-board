@@ -1821,6 +1821,7 @@ details > summary { cursor:pointer; color:var(--muted); font-size:12px; margin-t
   <a href="/planner">Planner</a>
   <a href="/sessions">Sessions</a>
   <a href="/tickets">Tickets</a>
+  <a href="/messages">Messages</a>
   <button class="chip" id="needOnly" aria-pressed="true">Needs your review</button>
   <button class="chip" id="drafts" aria-pressed="false">Show draft PRs</button>
   <button class="chip" id="reload">Refresh from GitHub</button>

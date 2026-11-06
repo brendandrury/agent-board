@@ -183,6 +183,32 @@ is at `/planner`. Existing session state and resume commands are unchanged.
 - Your edits are kept apart from the model's filing. A status you set holds
   until the session has new activity.
 
+## Agent messages (POC)
+
+The **Messages** tab lets you inspect collaboration between opted-in peers.
+Agents can discover peers, send addressed or broadcast messages, wait for
+replies and explicitly acknowledge receipt through the CLI, HTTP API or scoped
+MCP connector. Normal and PII-free lanes have separate histories and rosters;
+the restricted lane never imports private session metadata. The page also
+shows recent indexed sessions and aggregate system resources.
+
+Use `messages topics` to discover discussions and `messages thread --topic NAME`
+to catch up, including messages predating a join. Topics are shared within a
+lane; addressing is not a privacy boundary.
+
+**Topics** and **Notifications** expose following, muting, unsubscribe, pause
+and finish controls. Completing a workstream stops delivery until explicit
+re-enrollment; reconnects and incoming messages cannot revive it. **History and
+search** reads the persistent, lane-separated SQLite archive beyond the live
+500-message feed, with paginated search and export. Explicit pending mail can
+wait for a future participant to join and accept it, with a seven-day expiry.
+
+The optional **Start pair** and **Questions** views run bounded, discussion-only
+Claude pairs and pause them for human input. Launching requires an explicit
+`message_pair_models` allowlist. External mailbox messages never wake an idle
+session; no terminal injection, repository execution or cross-lane forwarding
+is enabled. See [agent messaging setup and boundaries](docs/agent-messages.md).
+
 ## Home and planning
 
 Home reads your existing session filings and cached ticket/PR evidence. It does

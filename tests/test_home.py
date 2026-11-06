@@ -343,6 +343,29 @@ class ReviewIntegration(Base):
 
 
 class Signals(Base):
+    def test_unreadable_mailbox_does_not_break_other_home_signals(self):
+        import messages
+        with patch.object(ab, "live_sessions", return_value={}), \
+             patch.object(messages, "load", side_effect=[home.sqlite3.DatabaseError("PRIVATE_DETAIL"), {"pairs": {}}]):
+            _, attention, _ = home.signals({})
+        warning = next(a for a in attention if a["id"] == "mailbox:normal")
+        self.assertTrue(warning["stale"])
+        self.assertNotIn("PRIVATE_DETAIL", json.dumps(attention))
+
+    def test_pair_questions_join_human_attention_without_launching(self):
+        import messages
+        for lane in messages.LANES:
+            with messages.transaction(lane) as state:
+                state["pairs"] = {"synthetic": {"id": "synthetic", "title": "Synthetic discussion", "state": "question",
+                                                "question": {"text": "Which option should we use?"}},
+                                  "finished": {"id": "finished", "title": "Finished", "state": "complete",
+                                               "question": {"text": "An old question"}}}
+        with patch.object(ab, "live_sessions", return_value={}):
+            _, attention, _ = home.signals({})
+        questions = [a for a in attention if a["id"].startswith("pair:")]
+        self.assertEqual(len(questions), 2)
+        self.assertEqual({q["url"] for q in questions}, {"/messages?lane=normal&view=questions", "/messages?lane=pii-free&view=questions"})
+
     def test_real_signals_use_local_evidence_and_latest_review_only(self):
         ab.save_json(ab.SESSIONS_FILE, {"sessions": {"s1": {"id": "s1", "kind": "claude", "home": "/unused", "cwd": "",
             "last_ts": home.now(), "filing": {"title": "Decision needed", "status": "open", "awaiting_user": True, "next_step": "Choose scope"}}}})

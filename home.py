@@ -9,6 +9,7 @@ import fcntl
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import threading
 import urllib.parse
@@ -244,6 +245,22 @@ def signals(launchers):
         if asks:
             attention.append({"id": "review:" + str(path.parent.relative_to(root)), "title": f"PR #{run.get('pr')}: review questions",
                               "reason": f"{len(asks)} unanswered questions", "url": "/reviews#pr-" + str(run.get("pr")), "stale": False})
+    # This is the human Home view, not an agent connector. It may link to either
+    # lane, but does not copy those questions into another mailbox or start work.
+    import messages
+    for lane in messages.LANES:
+        try:
+            pairs = messages.load(lane).get("pairs", {})
+        except (OSError, ValueError, sqlite3.Error):
+            attention.append({"id": "mailbox:" + lane, "title": "Mailbox history unavailable",
+                              "reason": "Could not read the " + lane + " lane; inspect storage before continuing pairs.",
+                              "url": "/messages?lane=" + lane, "stale": True})
+            continue
+        for pair in pairs.values():
+            if pair["state"] == "question" and pair.get("question"):
+                attention.append({"id": "pair:" + lane + ":" + pair["id"], "title": "Discussion: " + pair["title"],
+                                  "reason": clean(pair["question"]["text"], 300),
+                                  "url": "/messages?lane=" + lane + "&view=questions", "stale": False})
     return active[:SESSION_LIMIT], attention, cache
 
 
@@ -517,7 +534,7 @@ dialog input,dialog textarea,dialog select { width:100%; } textarea { resize:ver
 #status { min-height:20px; } .notice { padding:10px 12px; border:1px solid var(--line); border-radius:6px; }
 @media(max-width:800px) { .grid,.horizons { grid-template-columns:1fr; } main { padding:18px 14px 60px; } header { padding:12px 14px; gap:12px; } }
 </style></head><body>
-<header><strong>agent-board</strong><a href="/">Home</a><a href="/planner">Planner</a><a href="/sessions">Sessions</a><a href="/reviews">PR reviews</a><a href="/tickets">Tickets</a></header>
+<header><strong>agent-board</strong><a href="/">Home</a><a href="/planner">Planner</a><a href="/sessions">Sessions</a><a href="/reviews">PR reviews</a><a href="/tickets">Tickets</a><a href="/messages">Messages</a></header>
 <main><div class="intro"><div><h1 id="title">Your work</h1><p class="muted" id="subtitle"></p></div><div class="actions"><button id="reload">Rescan sessions</button><button id="slack">Refresh Slack</button><button class="primary" id="addOutcome">Add outcome</button></div></div>
 <p id="status" role="status" aria-live="polite" class="muted"></p><p id="error" class="err" role="alert"></p><div id="content"></div></main>
 <dialog id="editor"><form id="form"><h2 id="editorTitle"></h2><div id="fields"></div><p id="formError" class="err" role="alert"></p><div class="actions"><button class="primary" id="save" type="submit">Save</button><button type="button" id="cancel">Cancel</button></div></form></dialog>

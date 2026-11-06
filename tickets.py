@@ -696,6 +696,7 @@ details > summary { cursor:pointer; color:var(--muted); font-size:12px; margin-t
   <a href="/planner">Planner</a>
   <a href="/sessions">Sessions</a>
   <a href="/reviews">PR reviews</a>
+  <a href="/messages">Messages</a>
   <select class="chip" id="ticketView" aria-label="Ticket view"><option value="">All tickets</option></select>
   <button class="chip" id="mine" aria-pressed="false">Assigned to me</button>
   <button class="chip" id="showDone" aria-pressed="false">Show done</button>
