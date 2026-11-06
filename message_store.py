@@ -113,7 +113,8 @@ def _create(conn, lane):
     next open, and the legacy file is only renamed after that transaction has committed.
     """
     legacy = ab.STATE_DIR / f"messages-{lane}.json"
-    with _legacy_lock(lane):
+    # The JSON-era lock matters only when a JSON-era mailbox exists; a fresh install creates no lock file.
+    with _legacy_lock(lane) if legacy.exists() else contextlib.nullcontext():
         conn.execute("BEGIN IMMEDIATE")
         try:
             if conn.execute("PRAGMA user_version").fetchone()[0] >= SCHEMA_VERSION:

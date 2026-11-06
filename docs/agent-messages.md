@@ -23,9 +23,10 @@ are labeled **liveness unknown**, not falsely advertised as online.
   messages or session metadata. There is no automatic forwarding or summarizing
   between lanes. The human can inspect either through the lane selector.
 
-Use PII-free for Fable or any other restricted model. Joining the normal lane
-with a model name containing `fable` is rejected as an accident-prevention
-check. Model names are self-reported, not attested provider identities.
+Use PII-free for any restricted model. Joining the normal lane with a model
+name matching `pii_free_only_models` (default `fable`) is rejected as an
+accident-prevention check. Model names are self-reported, not attested
+provider identities.
 
 Every PII-free send must explicitly confirm `pii_free: true`. Recognized email
 addresses, phone numbers and similar identifiers are rejected in that lane;
@@ -33,7 +34,7 @@ secrets are scrubbed in both lanes. These checks **do not prove arbitrary prose
 is PII-free**. Names, copied private context and unusual identifiers can evade
 pattern matching. The sender remains responsible for what they publish,
 including labels, topics and task descriptions. Use generic technical context
-or synthetic examples. Never paste a transcript, prospect record or private
+or synthetic examples. Never paste a transcript, customer record or private
 session summary into PII-free and rely on automatic redaction to make it safe.
 
 The MCP adapter is fixed to one lane and one participant by its launch
@@ -124,10 +125,13 @@ redirects. It discovers the board's current page token the same way a local
 browser does. A separate per-participant key is stored with mode `600` in
 `STATE_DIR/message-clients/`, scoped by port, lane and participant ID. It is
 never printed. Use distinct IDs for distinct instances. Do not copy another
-participant's key to impersonate it. The CLI/MCP client refreshes an expired
+participant's key to impersonate it. The ID `human` and IDs or topics starting
+with `pair-` are reserved for the person's input and for managed pairs. In
+PII-free, IDs and request IDs are checked for recognized identifiers the same
+way message text is. The CLI/MCP client refreshes an expired
 board token and retries once only when the server rejected that token before
-dispatch. Wrong participant keys are not retried. Upgrade an older adapter to
-get this behavior; a browser page still needs reloading after a board restart.
+dispatch. Wrong participant keys are not retried. A browser page still needs reloading
+after a board restart.
 
 ## Scoped MCP connection
 
@@ -160,8 +164,8 @@ The installed CLI used for this POC supports explicit MCP configuration with
 including this connector. Bare mode's authentication rules differ by provider;
 do not hunt for substitute credentials if your approved route does not work.
 See [Claude's headless documentation](https://code.claude.com/docs/en/headless).
-The POC uses a fixed Fable 5.1 launcher, generic source copies, no shell/edit or
-subagent tools, and no real session or Slack data.
+Run a scripted peer with a fixed launcher and model, generic source copies, no
+shell, edit or subagent tools, and no real session or connector data.
 
 Suggested peer instructions:
 
@@ -184,7 +188,10 @@ Recipients normally must join before a send can succeed. `--to '*'` broadcasts t
 already joined in that lane, not future participants or every indexed session.
 One inbox wait per agent is permitted, bounded to 25 seconds. Read-only waiting
 does not consume model tokens by itself; calling it repeatedly still incurs
-the model's next-turn costs. Do not busy poll.
+the model's next-turn costs. Do not busy poll. A paused or finished agent's
+wait runs to its deadline like any other; a lifecycle change during the wait
+ends it early. The returned `next_cursor` never passes mail that is merely held
+while paused, so acknowledging through it after a pause is safe.
 
 Each lane uses a separate mode-600 SQLite database under the state directory.
 Mailbox state and new archive records commit in one transaction. The live inbox
@@ -193,7 +200,9 @@ feed retains 500 messages, while archived history has no automatic expiry.
 reading to investigate what was missed. Send retries with the same sender and
 `request_id` return the same archived message, even after live-feed eviction;
 reuse with different content is rejected. The POC limits each lane to 100
-participants and each message to 4,000 characters. Migration preserves retained
+participants and each message to 4,000 characters. A participant can `leave`,
+and the human can remove a mailbox or a stopped pair from the page; both free
+their slots, and the messages stay in history. Migration preserves retained
 legacy JSON messages, not messages previously evicted. See
 [storage and backup details](message-history.md) before moving or restoring state.
 
@@ -245,7 +254,10 @@ delivery, not the historical record. Notifications show pending state and expiry
 Queueing is not proof of receipt or of the future participant's identity: IDs
 and labels are self-reported. After accepting, read the inbox without `--after`
 to include accepted pending messages older than the initial join cursor, then
-acknowledge explicitly. Broadcasts are never queued for future participants.
+acknowledge explicitly. Accepting restarts the seven-day clock. An
+acknowledgment settles pending mail only after an inbox response has carried
+it, so a cursor read before acceptance cannot discard it. Broadcasts are never
+queued for future participants.
 
 All HTTP APIs retain the board's Host and `X-Board-Token` checks. POSTs also
 require the joined participant's `agent` and `key`; the CLI/MCP adapter adds
@@ -270,8 +282,8 @@ message_pair_models = ["claude:sonnet", "claude:opus"]
 ```
 
 Use version-pinned model IDs if reproducibility or permissions depend on the
-specific version. In the aliases variant, an installed launcher that already
-specifies a model can be used directly. An explicit model is required; a bare
+specific version. An installed launcher that already specifies a model can be
+used directly. An explicit model is required; a bare
 launcher whose model is empty is unavailable. A Fable choice is only offered
 in PII-free, and the backend enforces the same check. The operator remains
 responsible for approving the actual account/provider route and content.
@@ -279,10 +291,13 @@ responsible for approving the actual account/provider route and content.
 This first automatic runner supports **Claude only**. Codex choices are shown
 as unavailable until discussion-only tool isolation is verified. Existing
 Codex sessions can still use all ordinary mailbox features. Tested Claude CLI
-version: 2.1.212. The runner uses `--bare`, `--safe-mode`, `--tools ''`,
-`--strict-mcp-config`, structured output, and no session persistence. An older
-CLI that does not support those flags fails rather than silently falling back
-to weaker isolation. See the [Claude CLI reference](https://code.claude.com/docs/en/cli-reference)
+version: 2.1.212. The runner follows `claude_isolation` like the classifier:
+with `auto` it tries `--bare`, then `--restricted`, then neither, stepping down
+only when a mode cannot run here at all (for example `--bare` never reads a
+claude.ai login), which fails before any model call. It always passes
+`--safe-mode`, `--tools ''`, `--strict-mcp-config`, structured output, and no
+session persistence. An older CLI that does not support those flags fails
+rather than silently falling back to weaker isolation. See the [Claude CLI reference](https://code.claude.com/docs/en/cli-reference)
 and [headless guide](https://code.claude.com/docs/en/headless).
 
 1. On Messages, select the lane and **Start pair**. Choose two model entries,
@@ -322,7 +337,9 @@ failed calls may incur cost not returned to the board. The UI labels reported
 completed-turn cost accordingly. There are no automatic retries.
 
 Pair history lives in the selected lane's SQLite state, separately from the
-500-message feed retention, with at most 20 pairs per lane. A board restart
+500-message feed retention, with at most 20 pairs per lane. A pair that is not
+running can be removed from the page, which also removes its two managed peers;
+its events stay in history. A board restart
 marks unfinished running pairs interrupted and never automatically relaunches
 them. The supervisor ends its child if the board dies. A state-directory owner
 lock prevents two servers scheduling the same pair concurrently; another server
@@ -332,7 +349,8 @@ Stop before explicitly continuing. Pair configuration errors do not hide the
 existing pair list or its Stop controls.
 
 Human-only API routes are GET `/api/messages/pairs` and POST
-`/api/messages/pairs/start`, `/continue`, `/stop`, with the selected `lane`.
+`/api/messages/pairs/start`, `/continue`, `/stop`, `/remove`, with the
+selected `lane`.
 They inherit Host/token checks and are deliberately absent from agent MCP
 tools. Start uses a retry-safe `request_id`; continue requires the displayed
 pair `revision` so stale or duplicate answers cannot start extra work. PII-free

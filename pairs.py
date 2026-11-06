@@ -77,7 +77,7 @@ def choices():
         if not L.model:
             reason = "An explicit model is required: use launcher:model"
         rows.append({"id": spec, "kind": L.kind, "model": L.model,
-                     "pii_free_only": "fable" in (spec + " " + L.model).lower(),
+                     "pii_free_only": msg.restricted_model(spec + " " + L.model),
                      "available": not reason, "unavailable_reason": reason})
     return rows
 
@@ -122,7 +122,12 @@ def kill(process):
             pass
 
 
-def command(L, system):
+def modes():
+    """Isolation modes to try, strongest first, the way the classifier reads claude_isolation."""
+    return ["bare", "restricted", "none"] if ab.CFG.claude_isolation == "auto" else [ab.CFG.claude_isolation]
+
+
+def command(L, system, mode="bare"):
     """Use existing provider routes, but do not load private agent context."""
     if L.kind != "claude":
         raise ValueError("Only Claude discussion-only launches have verified tool isolation")
@@ -132,10 +137,17 @@ def command(L, system):
              "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS"}
     env = {k: v for k, v in os.environ.items() if k in names or k.startswith(("AWS_", "ANTHROPIC_", "CLAUDE_CODE_"))}
     env["CLAUDE_CONFIG_DIR"] = L.home
-    return review._command(L, ["-p", "--bare", "--safe-mode", "--tools", "", "--strict-mcp-config",
+    return review._command(L, ["-p", *ab._ISOLATION[mode], "--safe-mode", "--tools", "", "--strict-mcp-config",
         "--no-session-persistence", "--effort", "medium", "--output-format", "json",
         "--system-prompt", system, "--json-schema", json.dumps(SCHEMA),
         "--max-budget-usd", str(CLAUDE_TURN_USD)]), env
+
+
+def failed(stdout):
+    try:
+        return bool(json.loads(stdout).get("is_error"))
+    except (ValueError, AttributeError):
+        return True
 
 
 def run_turn(manager, pair):
@@ -148,23 +160,32 @@ def run_turn(manager, pair):
     prompt = json.dumps({"you": actor["id"], "lane": pair["lane"], "turn": pair["turns"],
                          "remaining_turns": pair["limit"] - pair["turns"] + 1, "events": pair["events"]})
     with tempfile.TemporaryDirectory(prefix="agent-board-pair-") as td:
-        cmd, env = command(L, system)
-        # Capture output locally; never publish raw stderr, provider traces or paths.
-        with manager.lock:
-            if manager.cancelled(pair):
-                return None
-            process = subprocess.Popen([sys.executable, "-c", SUPERVISOR, str(os.getpid()), str(TURN_SECONDS), *cmd],
-                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=td,
-                env=env, start_new_session=True, pass_fds=(manager.owner.fileno(),))
-            manager.process = process
-        try:
-            stdout, _ = process.communicate(prompt, timeout=TURN_SECONDS + 5)
-        finally:
-            kill(process)
-            process.wait()
+        for mode in list(manager.modes):
+            cmd, env = command(L, system, mode)
+            # Capture output locally; never publish raw stderr, provider traces or paths.
             with manager.lock:
-                if manager.process is process:
-                    manager.process = None
+                if manager.cancelled(pair):
+                    return None
+                process = subprocess.Popen([sys.executable, "-c", SUPERVISOR, str(os.getpid()), str(TURN_SECONDS), *cmd],
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=td,
+                    env=env, start_new_session=True, pass_fds=(manager.owner.fileno(),))
+                manager.process = process
+            try:
+                stdout, stderr = process.communicate(prompt, timeout=TURN_SECONDS + 5)
+            finally:
+                kill(process)
+                process.wait()
+                with manager.lock:
+                    if manager.process is process:
+                        manager.process = None
+            # A mode that cannot run here (for example --bare never reads a claude.ai login) fails before
+            # any model call. Step down once, like the classifier, and remember it for later turns.
+            if ab._SETUP_ERROR.search(stderr + stdout) and (process.returncode or failed(stdout)):
+                with manager.lock:
+                    if len(manager.modes) > 1 and mode in manager.modes:
+                        manager.modes.remove(mode)
+                        continue
+            break
         if process.returncode:
             raise ValueError("Model process failed or exceeded its time/budget limit; no automatic retry")
         result = json.loads(stdout)
@@ -175,6 +196,7 @@ def run_turn(manager, pair):
 
 class Manager:
     def __init__(self, caller=run_turn):
+        self.modes = modes()
         self.lock = threading.RLock()
         self.closed = False
         self.caller, self.process, self.active, self.thread = caller, None, None, None
@@ -268,11 +290,22 @@ class Manager:
             return result
 
     def change(self, body, lane, action):
+        pid = body.get("id")
+        if not isinstance(pid, str):
+            raise ValueError("Pair id must be a string")
         with self.lock:
             with msg.transaction(lane) as state:
-                pair = state.get("pairs", {}).get(body.get("id"))
+                pair = state.get("pairs", {}).get(pid)
                 if not pair:
                     raise LookupError("Pair not found in this lane")
+                if action == "remove":
+                    # Frees the pair's retention slot and its two participant slots. Its events stay in history.
+                    if pair["state"] == "running" or self.active == (lane, pid):
+                        raise ValueError("Stop the pair before removing it")
+                    for actor in pair["actors"]:
+                        state["agents"].pop(actor["id"], None)
+                    del state["pairs"][pid]
+                    return {"id": pid, "removed": True}
                 if action == "stop":
                     if pair["state"] == "complete":
                         return copy.deepcopy(pair)
@@ -282,7 +315,7 @@ class Manager:
                             delivery.enroll(state["agents"][actor["id"]], "paused", state["next_id"] - 1)
                     self.presence(state, pair, "offline")
                 else:
-                    if msg.number(body.get("revision"), 0, 2**53 - 1) != pair["revision"]:
+                    if msg.number(body.get("revision"), 0, msg.store.MAX_ID) != pair["revision"]:
                         raise ValueError("Pair changed; refresh before continuing")
                     if pair["state"] not in ("question", "idle", "limited", "interrupted", "error", "stopped"):
                         raise ValueError("This pair is not waiting for input")
@@ -422,6 +455,6 @@ def route(board, method, path, body, lane):
                      "max_turns": MAX_TURNS, "turn_seconds": TURN_SECONDS, "claude_turn_usd": CLAUDE_TURN_USD}, mime
     if method == "POST" and path == "/api/messages/pairs/start":
         return 200, manager(board).start(body, lane), mime
-    if method == "POST" and path in ("/api/messages/pairs/continue", "/api/messages/pairs/stop"):
+    if method == "POST" and path in ("/api/messages/pairs/continue", "/api/messages/pairs/stop", "/api/messages/pairs/remove"):
         return 200, manager(board).change(body, lane, path.rsplit("/", 1)[1]), mime
     return 404, {"error": "not found"}, mime

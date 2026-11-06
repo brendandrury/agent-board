@@ -129,6 +129,73 @@ class DiscussionPairs(unittest.TestCase):
         agents = msg.load()["agents"]
         self.assertEqual([pairs.delivery.lifecycle(agents[a["id"]]) for a in pair["actors"]], ["finished", "paused"])
 
+    def test_pair_id_must_be_a_string(self):
+        for bad in (["x"], 5, None, {"id": "x"}):
+            with self.assertRaises(ValueError):
+                self.runner.change({"id": bad}, "normal", "stop")
+
+    def test_remove_frees_participants_and_keeps_history(self):
+        pair = self.start()
+        self.assertEqual(len(msg.load()["agents"]), 2)
+        with msg.transaction() as state:
+            state["pairs"][pair["id"]]["state"] = "running"
+        with self.assertRaises(ValueError):
+            self.runner.change({"id": pair["id"]}, "normal", "remove")
+        with msg.transaction() as state:
+            state["pairs"][pair["id"]]["state"] = "complete"
+        board = argparse.Namespace(pair_manager=self.runner)
+        status, result, _ = pairs.route(board, "POST", "/api/messages/pairs/remove", {"id": pair["id"]}, "normal")
+        self.assertEqual((status, result["removed"]), (200, True))
+        state = msg.load()
+        self.assertEqual((state["pairs"], state["agents"]), ({}, {}))
+        self.assertEqual(len(msg.history(topic=pair["id"])["messages"]), len(pair["events"]))
+        with self.assertRaises(LookupError):
+            self.runner.change({"id": pair["id"]}, "normal", "stop")
+
+    def test_isolation_modes_follow_claude_isolation(self):
+        L = ab.Launcher("claude", "claude", "/tmp/synthetic-profile", "test-model")
+        self.assertIn("--bare", pairs.command(L, "system", "bare")[0])
+        self.assertIn("--restricted", pairs.command(L, "system", "restricted")[0])
+        plain = pairs.command(L, "system", "none")[0]
+        self.assertNotIn("--bare", plain)
+        self.assertIn("--safe-mode", plain)
+        self.assertEqual(pairs.modes(), ["bare", "restricted", "none"])
+        with patch.object(ab.CFG, "claude_isolation", "none"):
+            self.assertEqual(pairs.modes(), ["none"])
+
+    def test_setup_errors_step_down_isolation_without_a_model_call(self):
+        pair = {"id": "pair-synthetic", "lane": "normal", "title": "Synthetic", "prompt": "Synthetic", "state": "running",
+                "actors": [{"id": "pair-synthetic-1", "launcher": "claude:test-model", "kind": "claude", "model": "test-model"}],
+                "events": [], "turns": 0, "limit": 2, "next": 0}
+        with msg.transaction() as state:
+            state.setdefault("pairs", {})["pair-synthetic"] = pair
+        attempts, outcomes = [], [(1, "", "Not logged in. Please run /login"),
+                                  (0, json.dumps({"structured_output": {"kind": "done", "text": "ok"}, "total_cost_usd": .01}), "")]
+
+        class FakeProcess:
+            def __init__(self, argv, **kwargs):
+                attempts.append(argv)
+                self.pid, self.returncode = os.getpid(), None
+
+            def communicate(self, prompt, timeout=None):
+                self.returncode, out, err = outcomes.pop(0)
+                return out, err
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self):
+                return self.returncode
+
+        with patch.object(pairs.subprocess, "Popen", FakeProcess), patch.object(pairs, "kill"):
+            result, cost = pairs.run_turn(self.runner, pair)
+        self.assertEqual((result["kind"], cost), ("done", .01))
+        self.assertEqual(len(attempts), 2)
+        self.assertIn("--bare", attempts[0])
+        self.assertIn("--restricted", attempts[1])
+        self.assertNotIn("--bare", attempts[1])
+        self.assertEqual(self.runner.modes, ["restricted", "none"])  # remembered for later turns
+
     def test_limit_and_failed_attempts_consume_turns(self):
         self.outputs = [("message", "Another useful thought.")] * 24
         pair = self.start(turns=2)

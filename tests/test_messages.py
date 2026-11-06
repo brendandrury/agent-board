@@ -8,7 +8,7 @@ import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 import urllib.error
 import urllib.request
 
@@ -182,6 +182,24 @@ class Mailboxes(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "recognized identifier"):
             msg.history("pii-free", query="fictional.person@example.test")
         self.assertEqual(msg.history(query="fictional.person@example.test")["query"], "fictional.person@example.test")
+
+    def test_mcp_adapter_survives_malformed_requests_and_transport_errors(self):
+        requests = [{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": ["not", "an", "object"]},
+                    {"jsonrpc": "2.0", "id": 2, "method": "ping", "params": "nope"},
+                    {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "peers", "arguments": {}}},
+                    {"jsonrpc": "2.0", "id": 4, "method": "ping"}]
+        client = Mock()
+        client.call.side_effect = RuntimeError("synthetic transport failure")
+        output = io.StringIO()
+        with patch.object(msg.sys, "stdin", io.StringIO("\n".join(json.dumps(r) for r in requests))), \
+             patch.object(msg.sys, "stdout", output):
+            msg.mcp(client)
+        replies = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual([r["id"] for r in replies], [1, 2, 3, 4])
+        self.assertTrue(replies[0]["result"]["isError"])
+        self.assertIn("error", replies[1])
+        self.assertTrue(replies[2]["result"]["isError"])  # an unexpected transport exception is a tool error, not a crash
+        self.assertEqual(replies[3]["result"], {})
 
     def test_wait_is_woken_by_send_without_acknowledging(self):
         result = []

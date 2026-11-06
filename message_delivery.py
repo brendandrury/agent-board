@@ -36,6 +36,11 @@ def expired(record):
     return record["expires_at"] <= now()
 
 
+def expiry():
+    """Seven days from the board's clock. Acceptance restarts it."""
+    return (datetime.datetime.fromisoformat(now()) + datetime.timedelta(days=PENDING_DAYS)).isoformat(timespec="microseconds")
+
+
 def settle(state, key, status):
     record = state.setdefault("pending", {}).pop(key)
     receipts = state.setdefault("pending_receipts", {})
@@ -55,8 +60,7 @@ def queue(state, message):
     pending = state.setdefault("pending", {})
     if len(pending) >= MAX_PENDING:
         raise ValueError("Pending-recipient queue is full; cancel old requests or wait for expiry")
-    pending[str(message["id"])] = {"message": message, "state": "waiting", "expires_at": (
-        datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=PENDING_DAYS)).isoformat(timespec="microseconds")}
+    pending[str(message["id"])] = {"message": message, "state": "waiting", "expires_at": expiry()}
 
 
 def accept_pending(state, agent):
@@ -65,16 +69,25 @@ def accept_pending(state, agent):
     accepted = []
     for key, record in state.get("pending", {}).items():
         if record["message"]["to"] == agent["id"] and record["state"] == "waiting":
-            record["state"] = "accepted"
+            record.update(state="accepted", accepted_at=now(), expires_at=expiry())  # seven days to read and acknowledge
             accepted.append(int(key))
     agent["settings_revision"] = agent.get("settings_revision", 0) + 1
     return accepted
 
 
+def mark_delivered(state, agent_id, ids):
+    """An inbox response carried these accepted messages. Only delivered mail can be settled by an ack."""
+    for key in map(str, ids):
+        record = state.get("pending", {}).get(key)
+        if record and record["state"] == "accepted" and record["message"]["to"] == agent_id:
+            record["delivered"] = True
+
+
 def acknowledge_pending(state, agent, through):
+    """Settle accepted mail that some inbox response has shown; a cursor read before acceptance cannot discard it."""
     prune_pending(state)
     for key, record in list(state.get("pending", {}).items()):
-        if record["message"]["to"] == agent["id"] and record["state"] == "accepted" and int(key) <= through:
+        if record["message"]["to"] == agent["id"] and record["state"] == "accepted" and record.get("delivered") and int(key) <= through:
             settle(state, key, "acknowledged")
 
 
@@ -154,6 +167,13 @@ def incoming(state, agent, after, notifications=False, include_pending=True):
     return sorted(messages, key=lambda m: m["id"])
 
 
+def cursor(state, agent, after):
+    """The highest id this agent can acknowledge without skipping mail that is only held while paused."""
+    held = [m["id"] for m in state["messages"]
+            if m["id"] > after and not m.get("pending_recipient") and policy(m, agent) == "paused"]
+    return min(state["next_id"] - 1, min(held) - 1) if held else state["next_id"] - 1
+
+
 def receipt(state, message):
     if message["to"] == "human":
         return "Question posted for the human"
@@ -197,7 +217,7 @@ def summary(state, agent, topics):
     ready = incoming(state, agent, cursor, notifications=True)
     pending = [{"id": int(key), "from": r["message"]["from"], "to": r["message"]["to"],
                 "topic": r["message"]["topic"], "text": r["message"]["text"],
-                "state": "expired" if expired(r) else r["state"], "expires_at": r["expires_at"]}
+                "state": "expired" if expired(r) else r["state"], "expires_at": r["expires_at"], "delivered": r.get("delivered", False)}
                for key, r in state.get("pending", {}).items() if agent["id"] in (r["message"]["from"], r["message"]["to"])]
     return {"agent": agent["id"], "lifecycle": lifecycle(agent), "topics": rows,
             "settings_revision": agent.get("settings_revision", 0), "delivery_epoch": agent.get("delivery_epoch", 0),

@@ -114,6 +114,13 @@
 # medium = ["claude:opus", "codex:gpt-6-sol"]
 # high = ["claude:opus", "codex:gpt-6-sol", "claude:fable"]
 
+# Messages. Human-started discussion pairs stay off until this allowlist of
+# launcher[:model] entries is set; Claude only, and an explicit model is required.
+# message_pair_models = ["claude:sonnet", "claude:opus"]
+# Model names (substring match) whose mailbox participants and pair peers must
+# use the pii-free lane; joining the normal lane with one is rejected.
+# pii_free_only_models = ["fable"]
+
 # Saved views go in their own tables AFTER top-level settings. Descriptions are
 # scope criteria, not a JQL: each view classifies the already-loaded ticket list.
 # Keep private scope names, company context and memory paths in your own config.

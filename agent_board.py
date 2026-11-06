@@ -149,6 +149,7 @@ class Config:
     slack_max_messages: int = 40
     slack_max_threads: int = 12
     message_pair_models: list = dataclasses.field(default_factory=list)  # opt-in launcher[:model] allowlist
+    pii_free_only_models: list = dataclasses.field(default_factory=lambda: ["fable"])  # model-name substrings confined to the pii-free lane
 
     def finish(self):
         if self.slack_source not in ("", "api", "mcp"):
@@ -159,7 +160,7 @@ class Config:
             raise ValueError('claude_isolation must be "auto", "bare", "restricted" or "none"')
         for name in ("pii_cleared_models", "review_authors", "review_small", "review_rubric_sources",
                      "review_rubric_branches", "review_withhold_models", "tickets_launchers",
-                     "tickets_memory_paths", "slack_queries"):
+                     "tickets_memory_paths", "slack_queries", "message_pair_models", "pii_free_only_models"):
             if isinstance(getattr(self, name), str):
                 setattr(self, name, [getattr(self, name)])
         if self.classifier_model is None:

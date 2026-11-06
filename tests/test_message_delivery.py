@@ -1,4 +1,5 @@
 """Synthetic enrollment tests: reads, reconnects and messages never re-enlist."""
+import datetime
 from pathlib import Path
 import tempfile
 import threading
@@ -14,9 +15,10 @@ class Enrollment(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        p = patch.object(ab, "STATE_DIR", Path(self.tmp.name))
-        p.start()
-        self.addCleanup(p.stop)
+        for name, value in (("STATE_DIR", Path(self.tmp.name)), ("CFG", ab.Config().finish())):
+            p = patch.object(ab, name, value)
+            p.start()
+            self.addCleanup(p.stop)
         self.a = {"agent": "writer", "key": "a" * 40}
         self.b = {"agent": "reader", "key": "b" * 40}
         msg.join(self.a)
@@ -65,9 +67,108 @@ class Enrollment(unittest.TestCase):
     def test_pause_holds_mail_until_explicit_resume(self):
         old = self.send()
         self.settings("lifecycle", state="paused")
-        self.assertEqual(msg.inbox(self.b | {"wait": 25})["messages"], [])
+        self.assertEqual(msg.inbox(self.b)["messages"], [])
         self.settings("lifecycle", state="active")
         self.assertEqual(msg.inbox(self.b)["messages"], [old])
+
+    def test_paused_cursor_never_passes_held_mail(self):
+        self.settings("lifecycle", state="paused")
+        held = self.send()
+        view = msg.inbox(self.b)
+        self.assertEqual(view["messages"], [])
+        self.assertLess(view["next_cursor"], held["id"])
+        msg.update(self.b | {"through": view["next_cursor"]}, acknowledge=True)  # the documented process-then-ack loop
+        self.settings("lifecycle", state="active")
+        self.assertEqual(msg.inbox(self.b)["messages"], [held])
+
+    def test_paused_agent_long_poll_waits_and_wakes_on_resume(self):
+        held = self.send()
+        self.settings("lifecycle", state="paused")
+        result = []
+        thread = threading.Thread(target=lambda: result.append(msg.inbox(self.b | {"wait": 5})))
+        thread.start()
+        time.sleep(.2)
+        self.assertTrue(thread.is_alive())  # a paused agent waits instead of spinning
+        self.settings("lifecycle", state="active")
+        thread.join(3)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result[0]["messages"], [held])
+
+    def test_stale_ack_does_not_settle_pending_mail_never_shown(self):
+        sent = msg.send(self.a | {"to": "late", "topic": "work", "text": "Synthetic queued request",
+                                  "request_id": "pending-stale", "queue_if_absent": True})
+        late = {"agent": "late", "key": "l" * 40}
+        msg.join(late)
+        cursor = msg.inbox(late)["next_cursor"]  # read before accepting
+        msg.settings(late | {"action": "accept_pending"})
+        msg.update(late | {"through": cursor}, acknowledge=True)  # an ack computed before acceptance
+        self.assertEqual(msg.inbox(late)["messages"], [sent])  # never shown before that ack, so still pending
+        msg.update(late | {"through": cursor}, acknowledge=True)  # shown now, so this one settles it
+        self.assertEqual(msg.inbox(late)["messages"], [])
+        self.assertIn("acknowledged", msg.delivery.receipt(msg.load(), sent))
+
+    def test_accepting_restarts_pending_expiry(self):
+        sent = msg.send(self.a | {"to": "late", "topic": "work", "text": "Synthetic queued request",
+                                  "request_id": "pending-clock", "queue_if_absent": True})
+        late = {"agent": "late", "key": "l" * 40}
+        msg.join(late)
+        start, day = datetime.datetime.fromisoformat(msg.delivery.now()), datetime.timedelta(days=1)
+        clock = lambda days: patch.object(msg.delivery, "now", return_value=(start + days * day).isoformat(timespec="microseconds"))
+        with clock(6):
+            msg.settings(late | {"action": "accept_pending"})
+        with clock(12):
+            self.assertEqual(msg.inbox(late)["messages"], [sent])  # six days after acceptance: still deliverable
+        with clock(14):
+            self.assertEqual(msg.inbox(late)["messages"], [])
+            self.assertIn("expired", msg.delivery.receipt(msg.load(), sent))
+
+    def test_leave_and_remove_free_slots_and_keep_history(self):
+        sent = self.send()
+        msg.settings(self.b | {"action": "leave"})
+        self.assertNotIn("reader", msg.load()["agents"])
+        self.assertEqual(msg.history(query="Synthetic")["messages"], [sent])
+        with self.assertRaises(PermissionError):
+            msg.inbox(self.b)
+        self.assertEqual(msg.join(self.b)["acknowledged_through"], sent["id"])  # the same ID starts over
+        with self.assertRaises(ValueError):
+            msg.settings(self.b | {"action": "remove"})  # remove is the human's action
+        with self.assertRaises(ValueError):
+            msg.settings({"agent": "writer", "revision": 0, "action": "leave"}, admin=True)
+        msg.settings({"agent": "writer", "revision": 0, "action": "remove"}, admin=True)
+        self.assertNotIn("writer", msg.load()["agents"])
+        with msg.transaction() as state:
+            state["agents"]["reader"]["managed_pair"] = "pair-synthetic"
+        with self.assertRaises(ValueError):
+            msg.settings(self.b | {"action": "leave"})
+
+    def test_reserved_ids_and_topics(self):
+        for bad in ("human", "pair-x"):
+            with self.assertRaises(ValueError):
+                msg.join({"agent": bad, "key": "h" * 40})
+        for body in ({"to": "human"}, {"to": "human", "queue_if_absent": True}, {"to": "pair-abc-1", "queue_if_absent": True},
+                     {"to": "reader", "topic": "pair-abc"}):
+            with self.assertRaises(ValueError):
+                msg.send(self.a | {"text": "Synthetic", "request_id": "reserved"} | body)
+
+    def test_pii_free_identifiers_are_checked(self):
+        with self.assertRaises(ValueError):
+            msg.join({"agent": "call-415-555-0123", "key": "p" * 40}, "pii-free")
+        msg.join(self.a, "pii-free")
+        msg.join(self.b, "pii-free")
+        body = self.a | {"to": "reader", "text": "Synthetic", "pii_free": True}
+        for nonce in ("call_4155550123", "n\u00f8t-ascii", "a" * 81):
+            with self.assertRaises(ValueError):
+                msg.send(body | {"request_id": nonce}, "pii-free")
+        msg.send(body | {"request_id": "fine-1"}, "pii-free")
+        msg.send(self.a | {"to": "reader", "text": "Synthetic", "request_id": "call_4155550123"})  # the normal lane does not check ids
+
+    def test_restricted_models_come_from_config(self):
+        with patch.object(ab.CFG, "pii_free_only_models", ["fable", "private-only"]):
+            with self.assertRaises(ValueError):
+                msg.join({"agent": "r1", "key": "r" * 40, "model": "vendor-Private-Only-7"})
+            msg.join({"agent": "r1", "key": "r" * 40, "model": "vendor-Private-Only-7"}, "pii-free")
+        with patch.object(ab.CFG, "pii_free_only_models", []):
+            msg.join({"agent": "r2", "key": "s" * 40, "model": "claude-fable-5-1"})
 
     def test_mute_allows_explicit_inbox_without_notifications(self):
         self.settings("subscription", topic="work", state="muted")

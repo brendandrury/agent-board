@@ -350,6 +350,13 @@ class MessageStore(unittest.TestCase):
         store.load()
         self.assertEqual((db.stat().st_mode & 0o777, journal.stat().st_mode & 0o777), (0o600, 0o600))
 
+    def test_fresh_install_creates_no_legacy_lock_file(self):
+        append()
+        self.assertFalse((self.root / "messages-normal.lock").exists())
+        (self.root / "messages-pii-free.json").write_text(json.dumps(store.default_state()))
+        store.load("pii-free")
+        self.assertTrue((self.root / "messages-pii-free.lock").exists())  # only a JSON-era mailbox needs the old lock
+
     def test_topics_directory(self):
         append(count=2, topic="plan")
         append(count=1, topic="", text="untopiced")

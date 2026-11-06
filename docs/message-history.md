@@ -85,7 +85,9 @@ indefinitely.
 
 ## Migration
 
-On the first open of a lane's file, if `messages-<lane>.json` exists, the
+This is compatibility with boards that ran the JSON-era mailbox before this
+feature was committed; a fresh install never has that file and creates no lock
+file. On the first open of a lane's file, if `messages-<lane>.json` exists, the
 store takes the JSON-era lock file, imports the state and its retained messages
 in the schema-creation transaction, commits, and then renames the JSON file to
 `messages-<lane>.json.migrated-<utc>`. The durable marker is SQLite's
